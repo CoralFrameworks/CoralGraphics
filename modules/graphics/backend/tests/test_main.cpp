@@ -1,0 +1,30 @@
+/*
+ * Copyright (C) 2026 The Coral Project
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *      http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+#include <gtest/gtest.h>
+
+/**
+ * Entry point for the modules/graphics test binary.
+ *
+ * The RHI tests are deliberately device-free: they exercise the type tables, the handle pool, the
+ * capability model and the descriptor validators, none of which need a GPU. A real device is only
+ * reached through the optional GPU smoke test, which skips itself when no backend can be created.
+ * That split is what lets this suite run in CI on a machine with no graphics stack at all.
+ */
+int main(int argc, char** argv) {
+  ::testing::InitGoogleTest(&argc, argv);
+  return RUN_ALL_TESTS();
+}
