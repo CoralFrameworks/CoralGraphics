@@ -45,6 +45,7 @@ option(CORAL_BACKEND_SUPPORTS_OPENGL "Build the OpenGL backend" ON)
 option(CORAL_BACKEND_SUPPORTS_VULKAN "Build the Vulkan backend" ON)
 option(CORAL_BACKEND_SUPPORTS_SPIRV_CROSS "Build SPIRV-Cross" ON)
 option(CORAL_BACKEND_SUPPORTS_SHADERC "Build shaderc" ON)
+option(CORAL_SHADERC_SYNC_DEPS "Run shaderc git-sync-deps when its nested third_party tree is absent" ON)
 option(CORAL_GRAPHICS_WITH_EFFECT "Build the effect render-graph module" ON)
 
 # The Lottie reader's no-JSON branch is otherwise never compiled, because the wrapper is always present.
@@ -262,6 +263,15 @@ if (NOT TARGET png)
 
   # shaderc compiles GLSL source to SPIR-V. The Vulkan backend cannot work without it, which the backend
   # target itself reports; a GL-only build can.
+  if (CORAL_BACKEND_SUPPORTS_SHADERC AND EXISTS "${_coral_vendor}/shaderc/libshaderc/src/shaderc.cc")
+    include("${CMAKE_CURRENT_LIST_DIR}/SyncShadercDeps.cmake")
+    coral_sync_shaderc_deps("${_coral_vendor}/shaderc" _coral_shaderc_synced)
+    if (NOT _coral_shaderc_synced)
+      message(STATUS "CoralGraphics: shaderc dependencies are unavailable; shader modules must be supplied as SPIR-V")
+      set(CORAL_BACKEND_SUPPORTS_SHADERC OFF)
+    endif ()
+  endif ()
+
   if (CORAL_BACKEND_SUPPORTS_SHADERC AND EXISTS "${_coral_vendor}/shaderc/libshaderc/src/shaderc.cc")
     add_subdirectory("${_coral_vendor}/shaderc/coral" "${CMAKE_BINARY_DIR}/shaderc")
   elseif (CORAL_BACKEND_SUPPORTS_SHADERC)
