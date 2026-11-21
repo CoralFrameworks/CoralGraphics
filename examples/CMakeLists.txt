@@ -30,6 +30,13 @@ if (CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR)
   cmake_minimum_required(VERSION 3.19)
   project(CoralGraphicsExamples LANGUAGES C CXX)
 
+  # The macOS demo owns an NSOpenGLView, so this project needs Objective-C++ on Apple. The framework root
+  # enables it for the same reason when it is configured standalone; when this project adds the root, this
+  # call is the one that has to come first.
+  if (APPLE AND NOT IOS)
+    enable_language(OBJCXX)
+  endif ()
+
   set(CMAKE_CXX_STANDARD 20)
   set(CMAKE_CXX_STANDARD_REQUIRED ON)
 

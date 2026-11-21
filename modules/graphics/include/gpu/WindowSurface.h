@@ -61,7 +61,8 @@ namespace graphics::gpu {
  * | Windows | `HWND` | its `HDC` |
  * | Linux/X11 | `Window` | `Display*` |
  * | Linux/Wayland | `wl_surface*` (Vulkan); `nativeWindowExtra` is the `wl_egl_window*` for EGL | `wl_display*` |
- * | macOS/iOS | `CAMetalLayer*` | unused |
+ * | macOS/OpenGL | `NSView*` (used as the identity of the surface; CGL draws into the context's view) | unused; set `cglContext` |
+ * | macOS/Metal, iOS | `CAMetalLayer*` | unused |
  *
  * ## The one limitation worth knowing before choosing this class
  *
@@ -91,7 +92,15 @@ class WindowSurface final {
     void* nativeWindow = nullptr;
     /** `HDC` on Windows, `Display*` on Linux. Optional; the backends that need it can derive it from the window. */
     void* nativeDisplay = nullptr;
-
+    /**
+     * macOS: the `CGLContextObj` backing an `NSOpenGLContext`.
+     *
+     * CGL has no window-system call that creates a drawable: the application owns the `NSOpenGLContext` and
+     * attaches it to its view, and the backend adopts that context here. The context must be current when the
+     * surface is created and must stay on the thread that renders; the demo in `examples/graphics/mac` is the
+     * reference caller. Ignored by every other platform.
+     */
+    void* cglContext = nullptr;
     /**
      * Wayland's second handle: @c nativeWindow is the `wl_surface*` (what Vulkan needs), and this is
      * the `wl_egl_window*` (what EGL needs). Null on every other platform.

@@ -164,9 +164,19 @@ ctest --test-dir out/examples --output-on-failure
 
 `graphics_demo` writes a PNG rather than opening a window, so it runs anywhere; the Vulkan verification,
 the windowed Lottie players and the effect demos skip (exit code 77) when the device or display they
-need is not there. macOS builds the effect demos (`effect_demo`, `effect_benchmark`) but not the windowed
-`examples/graphics` demos: that directory has a Win32 and an X11/Wayland implementation and no macOS one
-yet, so on macOS `graphics_demo` and `lottie_player` are simply not part of the build.
+need is not there. On macOS the demo set is `mac_demo` (a Cocoa window over CGL/OpenGL 4.1, presenting
+through `gpu::WindowSurface`) plus the effect demos (`effect_demo`, `effect_benchmark`). The macOS
+`examples/graphics` window is interactive; `--verify` is the offscreen path for a build machine:
+
+```sh
+out/examples/bin/mac_demo                          # windowed, runs until closed or Esc/Q
+out/examples/bin/mac_demo --frames 120 --immediate
+out/examples/bin/mac_demo --frames 1 --snapshot out/mac_demo.png   # windowed, then read the frame back
+out/examples/bin/mac_demo --verify --backend opengl
+```
+
+There is no macOS `graphics_demo`/`lottie_player`: those two are the Win32 and X11/Wayland window
+implementations, while `mac_demo` is the Cocoa counterpart.
 
 ## Developer tools
 

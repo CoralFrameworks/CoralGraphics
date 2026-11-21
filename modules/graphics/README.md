@@ -1121,9 +1121,10 @@ cmake --build out/examples -j8
 ctest --test-dir out/examples --output-on-failure
 ```
 
-On macOS the examples project builds the effect demos only (`effect_demo` is the offscreen OpenGL
-check, `effect_benchmark` the timing one); `examples/graphics/` has no macOS window implementation, so
-the PNG-writing `graphics_demo` and the windowed players are not built there.
+On macOS the examples project builds `mac_demo` (a Cocoa/`NSOpenGLView` window over CGL that uses
+`gpu::WindowSurface`, with an offscreen `--verify` mode) and the effect demos (`effect_demo` is the
+offscreen OpenGL check, `effect_benchmark` the timing one). `examples/graphics/` still has no macOS
+port of the PNG-writing `graphics_demo` or the Lottie player; `mac_demo` is the windowed demonstration.
 
 A configure outside the application tree uses this repository's bundled submodules for libz, libyuv and
 libgtest; the dependency manifest in `cmake/CoralGraphicsDependencies.cmake` documents the resolution

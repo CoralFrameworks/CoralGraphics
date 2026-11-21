@@ -156,6 +156,7 @@ std::unique_ptr<WindowSurface> WindowSurface::make(const Configuration& configur
   descriptor.nativeDisplay = configuration.nativeDisplay;
   descriptor.nativeWindowExtra = configuration.nativeWindowExtra;
   descriptor.nativeWindowSystem = configuration.nativeWindowSystem;
+  descriptor.cglContext = configuration.cglContext;
   descriptor.width = configuration.width;
   descriptor.height = configuration.height;
   descriptor.presentMode = configuration.presentMode;
@@ -221,6 +222,7 @@ bool WindowSurface::initialize(backend::Device* device, const bool ownsDevice, c
   descriptor.nativeDisplay = configuration.nativeDisplay;
   descriptor.nativeWindowExtra = configuration.nativeWindowExtra;
   descriptor.nativeWindowSystem = configuration.nativeWindowSystem;
+  descriptor.cglContext = configuration.cglContext;
   descriptor.width = configuration.width;
   descriptor.height = configuration.height;
   descriptor.presentMode = configuration.presentMode;

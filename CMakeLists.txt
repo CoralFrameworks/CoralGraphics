@@ -33,10 +33,10 @@
 cmake_minimum_required(VERSION 3.19)
 project(CoralGraphics LANGUAGES CXX)
 
-# iOS has no CGL and no EGL: its context API, EAGL, is an Objective-C class, so the platform layer is one
-# Objective-C++ translation unit. The language is enabled only for that platform; a Windows or Linux
-# configure never names an Objective-C++ compiler.
-if (IOS)
+# Apple platforms have one Objective-C++ translation unit each: the iOS EAGL platform layer and the macOS
+# demo's Cocoa window. The language is enabled only on Apple; a Windows or Linux configure never names an
+# Objective-C++ compiler.
+if (APPLE)
   enable_language(OBJCXX)
 endif ()
 
