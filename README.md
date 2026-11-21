@@ -31,14 +31,85 @@ and the three libraries that are shared with the other frameworks (`libz`, `liby
 
 ```sh
 git submodule update --init --recursive
+```
 
+Then configure for the host. Windows and macOS use the generator each one ships with; Linux uses Ninja.
+
+```sh
+# Windows -- Visual Studio 17 2022
 cmake -S . -B build -G "Visual Studio 17 2022" -A x64
 cmake --build build --config Release
 ctest --test-dir build -C Release --output-on-failure
+
+# macOS -- the Command Line Tools' make (Ninja works too if it is installed)
+cmake -S . -B build -G "Unix Makefiles" -DCMAKE_BUILD_TYPE=Release
+cmake --build build -j8
+ctest --test-dir build \
+      -R "test_(graphics|backend|geometry|effect)|effect_(demo|public_header_boundary)|fuzz_parsers_smoke" \
+      --output-on-failure
+
+# Linux
+cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
+cmake --build build
+ctest --test-dir build --output-on-failure
 ```
 
 The submodules are pinned commits, so a standalone build is reproducible and needs no network access
 after the initial checkout.
+
+On macOS the prerequisites are the Xcode Command Line Tools (`xcode-select --install`, which also
+provides the Python 3 the shader-embedding step uses) and CMake 3.19 or newer (Homebrew's `cmake`, or
+the CMake.app bundle). The OpenGL backend is the system driver: CGL creates an OpenGL 4.1 core context,
+which is the highest version Apple provides and the desktop dialect the RHI targets. Vulkan is compiled
+in but the system has no Vulkan loader, so the Vulkan cases skip themselves rather than fail, and the
+OpenGL cases are the ones that run. `test_backend` prints the negotiated device (for example
+`Apple M...`, `OpenGL 4.1 core`, `CGL`) and its extension list, which is the quickest way to confirm
+the context is real.
+
+The macOS `ctest` line names this repository's suites rather than running everything: a standalone
+tree also registers the vendored libjpeg-turbo command-line tests, whose executables the codec wrapper
+does not build, so a plain `ctest` reports them as `Not Run`. The named set above is the complete
+CoralGraphics check -- facade, backend, geometry, effect, shader/fuzz smoke and the offscreen
+`effect_demo`.
+
+### iOS
+
+iOS is a cross build from a macOS host with full Xcode (the Command Line Tools alone have no iOS SDK).
+Its OpenGL backend is OpenGL ES 3.0 through EAGL, not EGL, so the platform layer is
+`GlPlatformEagl.mm`; an offscreen device needs no window and the tests run in the simulator.
+
+```sh
+# The build-time shader compiler is a host tool. Build it in the host tree first so the iOS build
+# embeds freshly compiled canvas shaders instead of the committed copy.
+cmake -S . -B build -G "Unix Makefiles" -DCMAKE_BUILD_TYPE=Release
+cmake --build build -j8 --target shader_compiler
+
+cmake -S . -B build-ios -G "Unix Makefiles" \
+      -DCMAKE_SYSTEM_NAME=iOS \
+      -DCMAKE_SYSTEM_PROCESSOR=arm64 \
+      -DCMAKE_OSX_SYSROOT=iphonesimulator \
+      -DCMAKE_OSX_ARCHITECTURES=arm64 \
+      -DCMAKE_OSX_DEPLOYMENT_TARGET=17.0 \
+      -DCMAKE_BUILD_TYPE=Release \
+      -DCORAL_SHADERS_COMPILER="$PWD/build/modules/graphics/tools/shader_compiler/shader_compiler"
+cmake --build build-ios -j8
+```
+
+Each test target is an `.app` bundle, so run it through the simulator rather than from the host shell:
+
+```sh
+xcrun simctl spawn booted build-ios/modules/graphics/backend/test_backend.app/test_backend
+xcrun simctl spawn booted build-ios/modules/graphics/test_graphics.app/test_graphics
+xcrun simctl spawn booted build-ios/modules/effect/test_effect.app/test_effect
+xcrun simctl spawn booted build-ios/modules/graphics/geometry/test_geometry.app/test_geometry
+```
+
+`test_backend` prints the negotiated device (`OpenGL ES 3.0`, `EAGL`) and the GPU tests render through
+the backend's framebuffer objects. A physical-device configure uses `-DCMAKE_OSX_SYSROOT=iphoneos` and
+adds the application's signing settings; the simulator is what the commands above verify. The
+`GpuSurface.TheWholeSvgCorpusInTheDemoGridMatchesTheRasterizer` comparison is skipped on the simulator
+because its software ES renderer does not reproduce the filter/image-heavy SVG corpus pixel for pixel;
+the individual SVG tests still run there.
 
 ### When CoralGraphics is used as a submodule of a project
 
@@ -64,22 +135,38 @@ The demos live in `examples/`. A top-level configure of this root adds them, so 
 libraries, their tests and the demo checks:
 
 ```sh
+# Windows
 cmake -S . -B build -G "Visual Studio 17 2022" -A x64
 cmake --build build --config Release
 ctest --test-dir build -C Release --output-on-failure
+
+# macOS
+cmake -S . -B build -G "Unix Makefiles" -DCMAKE_BUILD_TYPE=Release
+cmake --build build -j8
+ctest --test-dir build \
+      -R "test_(graphics|backend|geometry|effect)|effect_(demo|public_header_boundary)|fuzz_parsers_smoke" \
+      --output-on-failure
 ```
 
 The project is also configurable on its own, which keeps the framework build to libraries and tests:
 
 ```sh
+# Windows
 cmake -S examples -B out/examples -G "Visual Studio 17 2022" -A x64
 cmake --build out/examples --config Release
 ctest --test-dir out/examples -C Release --output-on-failure
+
+# macOS
+cmake -S examples -B out/examples -G "Unix Makefiles" -DCMAKE_BUILD_TYPE=Release
+cmake --build out/examples -j8
+ctest --test-dir out/examples --output-on-failure
 ```
 
 `graphics_demo` writes a PNG rather than opening a window, so it runs anywhere; the Vulkan verification,
 the windowed Lottie players and the effect demos skip (exit code 77) when the device or display they
-need is not there.
+need is not there. macOS builds the effect demos (`effect_demo`, `effect_benchmark`) but not the windowed
+`examples/graphics` demos: that directory has a Win32 and an X11/Wayland implementation and no macOS one
+yet, so on macOS `graphics_demo` and `lottie_player` are simply not part of the build.
 
 ## Developer tools
 
@@ -87,8 +174,12 @@ The probes (`effect_spike`, `field_probe`, `effect_orient_probe`) and the canvas
 not part of the default build:
 
 ```sh
-cmake -S . -B build -DCORAL_GRAPHICS_BUILD_DEV_TOOLS=ON
+cmake -S . -B build -G "Visual Studio 17 2022" -A x64 -DCORAL_GRAPHICS_BUILD_DEV_TOOLS=ON
 cmake --build build --config Release --target effect_spike field_probe canvas_glsl_generator
+
+# macOS
+cmake -S . -B build -G "Unix Makefiles" -DCMAKE_BUILD_TYPE=Release -DCORAL_GRAPHICS_BUILD_DEV_TOOLS=ON
+cmake --build build -j8 --target effect_spike field_probe canvas_glsl_generator
 ```
 
 The pathops and parser fuzzers build with `-DCORAL_BUILD_TESTS=ON` and live in

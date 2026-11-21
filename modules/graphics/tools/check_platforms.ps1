@@ -9,6 +9,8 @@
 #   Android : `src/codec/AndroidCodec.cpp` and the codec dispatch around it, and `GlPlatformEgl.cpp`
 #   Linux   : `GlPlatformGlx.cpp`
 #   macOS   : `GlPlatformCgl.cpp`
+#   iOS     : `GlPlatformEagl.mm`, which is Objective-C++ and is therefore checked by an iOS build (see
+#             README.md) rather than by this Windows-host script
 #
 # On a Windows host all of them are invisible, so a mistake in any one reaches its platform unnoticed. This has already
 # paid for itself twice: it found the GLX platform's `#undef None`, which removed the attribute-list terminator before
@@ -186,23 +188,6 @@ Write-Host 'compiled clean, with Xlib and GLX stubbed'
 
 Write-Host ''
 Write-Host 'What this does NOT show: that a Linux desktop gets a context. Xlib and GLX are stubs here.'
-
-# --- 3b. The same EGL source as iOS ------------------------------------------------------------------------------
-#
-# `GlPlatformEgl.cpp` is selected for both `ANDROID` and `IOS`, and the two differ by exactly one block: the Android
-# window-size query through `ANativeWindow`. Compiling it as iOS is therefore cheap and covers the only part of that
-# file a device build would exercise differently.
-Write-Host ''
-Write-Host '== compiling the EGL platform as iOS =='
-
-$compileIos = "`"$($vcvars.FullName)`" >nul 2>&1 && cl /nologo /std:c++20 /EHsc /c /Zs /DCORAL_BUILD_FOR_IOS=1 $includes `"$(Join-Path $root 'modules/graphics/backend/src/gl/platform/GlPlatformEgl.cpp')`""
-$iosOutput = cmd /c $compileIos 2>&1
-$iosCode = $LASTEXITCODE
-$iosOutput | Where-Object { $_ -match 'error' } | Select-Object -First 20
-if ($iosCode -ne 0) {
-  Write-Error "the iOS EGL configuration did not compile (exit $iosCode)"
-}
-Write-Host 'compiled clean'
 
 # --- 3d. Are the Linux and Android stubs faithful? ---------------------------------------------------------------
 #

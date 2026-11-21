@@ -67,6 +67,14 @@ std::string bundledFontPath() {
   };
 
   std::filesystem::path directory = std::filesystem::current_path();
+#if defined(CORAL_GRAPHICS_RESOURCE_DIR)
+  // A spawned iOS simulator process has no useful working directory, so the walk below would start at `/`
+  // and never see the checkout. The build already knows where the resources are, and the repository root is
+  // two levels above them; starting there makes the same search work on the simulator.
+  if (!std::filesystem::exists(directory / "third_party")) {
+    directory = std::filesystem::path(CORAL_GRAPHICS_RESOURCE_DIR).parent_path().parent_path();
+  }
+#endif
   for (int depth = 0; depth < 8 && !directory.empty(); ++depth) {
     for (const char* const relative : candidates) {
       const std::filesystem::path candidate = directory / relative;

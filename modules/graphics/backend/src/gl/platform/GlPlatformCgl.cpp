@@ -174,6 +174,15 @@ Result makePlatformContextCurrent(const GlPlatformContext& context) {
                                                                                           : Result::Error;
 }
 
+Result releasePlatformContextCurrent(const GlPlatformContext& context) {
+  // `CGLSetCurrentContext(nullptr)` clears the calling thread's current context and cannot affect another
+  // thread's, which is exactly the per-thread contract the header states. A CGL context that is not current on
+  // this thread is not an error: the call is a request to make sure nothing is current, and a thread that has
+  // already released its context has nothing left to do.
+  (void) context;
+  return CGLSetCurrentContext(nullptr) == kCGLNoError ? Result::Success : Result::Error;
+}
+
 bool platformSupportsMailboxPresent() noexcept {
   // False on purpose: a swap interval of 0 stops waiting for vertical sync, it does not drop a frame that the compositor has
   // not consumed yet. Reporting Mailbox from here would be a promise this platform cannot keep.

@@ -424,6 +424,13 @@ TEST(WindowSurface, RefusesAConfigurationWithoutAWindowOrASize) {
   graphics::gpu::WindowSurface::Configuration configuration;
   EXPECT_EQ(graphics::gpu::WindowSurface::make(configuration), nullptr) << "no window and no size must be refused";
 
+#if defined(__APPLE__)
+  // CGL never consumes the handle: the context is created by the backend and attaching it to an `NSView` is the view
+  // layer's job, so there is no native window here for the backend to validate or reject. The premise of the check
+  // below -- that a pretended handle is refused while the device comes up -- belongs to the platforms whose
+  // window-system layer interprets the handle (WGL, GLX, EGL).
+  GTEST_SKIP() << "CGL does not interpret a native window handle, so there is nothing to refuse";
+#else
   configuration.nativeWindow = reinterpret_cast<void*>(static_cast<uintptr_t>(1));
   configuration.width = 32;
   configuration.height = 32;
@@ -431,6 +438,7 @@ TEST(WindowSurface, RefusesAConfigurationWithoutAWindowOrASize) {
   // this returns null with a diagnostic, which is what a caller that passed the wrong handle needs to see.
   const auto surface = graphics::gpu::WindowSurface::make(configuration);
   EXPECT_EQ(surface, nullptr);
+#endif
 }
 
 /** Creates a window surface that joins @p group, or null. */

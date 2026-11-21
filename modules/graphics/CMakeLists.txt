@@ -52,7 +52,15 @@ add_subdirectory(geometry)
 # The build-time shader compiler and the GLSL it compiles belong to Graphics: the backend owns the
 # compile settings, and the shaders are the backend's data. Both live here so a standalone Graphics
 # repository can build its own tool instead of reaching into the application's tools/.
-add_subdirectory(tools/shader_compiler)
+#
+# The compiler is a *host* tool: a cross build cannot execute the executable it produces, so the
+# directory is skipped there. Such a build either receives a host compiler with
+# `-DCORAL_SHADERS_COMPILER=<path>` (the Android two-step in `shaders/README.md`) or uses the committed
+# `src/gpu/CanvasShadersEmbedded.h`. iOS is the case that made the distinction visible: CMake turns an
+# executable into a bundle there, and an install rule without a bundle destination fails the configure.
+if (NOT CMAKE_CROSSCOMPILING)
+  add_subdirectory(tools/shader_compiler)
+endif ()
 add_subdirectory(shaders)
 
 # ==================================================================================================

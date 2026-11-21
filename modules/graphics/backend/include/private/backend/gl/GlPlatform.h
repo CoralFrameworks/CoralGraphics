@@ -31,6 +31,7 @@
  * | Windows | WGL (`wglCreateContextAttribsARB`) | `wglGetProcAddress` |
  * | Linux | GLX (`glXCreateContextAttribsARB`) | `glXGetProcAddressARB` |
  * | macOS | CGL (`CGLChoosePixelFormat` + `kCGLPFAOpenGLProfile`) | `dlsym` on the framework |
+ * | iOS | EAGL (`EAGLContext`) | `dlsym` on the framework |
  * | Android | EGL (`eglCreateContext`) | `eglGetProcAddress` |
  *
  * Hiding that behind one interface is what lets `GlContext` and everything above it be written once.
@@ -86,6 +87,7 @@ enum class NativeApi : uint8_t {
   Egl,
   Wgl,
   Cgl,
+  Eagl,
 };
 
 struct GlPlatformContext {

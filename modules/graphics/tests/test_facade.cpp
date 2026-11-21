@@ -331,6 +331,9 @@ TEST(Facade, ShaderReflectionIsInThePublicVocabulary) {
 
 TEST(Facade, CompilesGlslAndKeepsBothForms) {
   REQUIRE_CONTEXT(context);
+  if (contextIsEs()) {
+    GTEST_SKIP() << "a #version 410 core source is a desktop-dialect case; the ES retarget floor is 310";
+  }
 
   // The source declares its own version, which is the supported way to author: glslang needs a profile
   // it can believe, and a desktop shader that will not name one is refused rather than guessed at. The

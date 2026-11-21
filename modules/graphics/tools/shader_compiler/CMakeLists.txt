@@ -47,4 +47,4 @@ set_target_properties(${TARGET} PROPERTIES FOLDER Tools)
 # installing) the rest of the tree it links against:
 #
 #   cmake --install <build> --component tools
-install(TARGETS ${TARGET} RUNTIME DESTINATION bin COMPONENT tools)
+install(TARGETS ${TARGET} RUNTIME DESTINATION bin BUNDLE DESTINATION bin COMPONENT tools)

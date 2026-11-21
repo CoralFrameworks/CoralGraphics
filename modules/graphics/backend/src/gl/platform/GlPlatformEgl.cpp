@@ -17,7 +17,7 @@
 /**
  * @file GlPlatformEgl.cpp
  *
- * EGL context creation, used on Android and iOS and as the fallback where no window-system backend
+ * EGL context creation, used on Android and as the fallback where no window-system backend
  * applies.
  *
  * EGL is the one context-creation API that is genuinely cross-platform, which makes it the right
@@ -41,7 +41,7 @@
 #include <android/log.h>
 #endif
 
-#if defined(CORAL_BUILD_FOR_ANDROID) || defined(CORAL_BUILD_FOR_IOS) || defined(CORAL_BUILD_FOR_LINUX)
+#if defined(CORAL_BUILD_FOR_ANDROID) || defined(CORAL_BUILD_FOR_LINUX)
 
 #if defined(CORAL_BUILD_FOR_LINUX)
 // Linux compiles this file beside GlPlatformGlx.cpp so that one binary can drive an X11 window
@@ -451,4 +451,4 @@ Extent2D queryPlatformSurfaceSize(const GlPlatformContext& context, const Surfac
 #undef platformSupportsMailboxPresent
 #endif
 
-#endif // CORAL_BUILD_FOR_ANDROID || CORAL_BUILD_FOR_IOS || CORAL_BUILD_FOR_LINUX
+#endif // CORAL_BUILD_FOR_ANDROID || CORAL_BUILD_FOR_LINUX

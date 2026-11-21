@@ -72,6 +72,79 @@ uint64_t hashBytes(const void* data, const size_t size) noexcept {
 }
 
 /**
+ * Removes every `binding = N` qualifier from the `layout(...)` lists in @p source.
+ *
+ * @return the source with those qualifiers gone; unchanged when there was none.
+ *
+ * ## Why a driver would need this
+ *
+ * `layout(binding = N)` on a sampler or a uniform block is GLSL 4.20, or 4.10 with
+ * `GL_ARB_shading_language_420pack`. SPIRV-Cross emits it whenever asked to keep explicit bindings, and macOS's
+ * OpenGL 4.1 driver implements neither: it does not advertise the extension and its compiler rejects the qualifier
+ * outright (`Unknown identifier 'binding' in layout`), even when the extension directive is present and merely
+ * warns. The alternative to stripping is refusing every module whose SPIR-V carries binding decorations, which is
+ * every module a modern shader compiler produces.
+ *
+ * The bindings are not lost. Reflection reads them from the SPIR-V before this runs, and the linked-program path
+ * already assigns them itself: `glUniformBlockBinding` for blocks and `glUniform1i` for samplers, using the
+ * reflected `(set, binding)` pair. The qualifier is therefore redundant on such a driver rather than load-bearing,
+ * and removing it is what lets the same module compile instead of being refused.
+ *
+ * Only the inside of a `layout(...)` list is touched, and only entries whose name is exactly `binding`, so
+ * `layout(location = ...)` and an identifier that merely contains the word are left alone.
+ */
+std::string stripLayoutBindingQualifiers(std::string source) {
+  size_t position = 0;
+  while ((position = source.find("layout", position)) != std::string::npos) {
+    const size_t open = source.find('(', position + 6);
+    if (open == std::string::npos) break;
+    const size_t close = source.find(')', open + 1);
+    if (close == std::string::npos) break;
+
+    const std::string qualifiers = source.substr(open + 1, close - open - 1);
+    std::string rebuilt;
+    bool removed = false;
+    size_t itemStart = 0;
+    while (itemStart <= qualifiers.size()) {
+      const size_t comma = qualifiers.find(',', itemStart);
+      const size_t itemEnd = comma == std::string::npos ? qualifiers.size() : comma;
+      std::string item = qualifiers.substr(itemStart, itemEnd - itemStart);
+
+      // Trim, so `binding = 0` and ` binding=0 ` are recognised the same way.
+      const size_t first = item.find_first_not_of(" \t\r\n");
+      const size_t last = item.find_last_not_of(" \t\r\n");
+      item = first == std::string::npos ? std::string() : item.substr(first, last - first + 1);
+
+      const bool isBinding = item.rfind("binding", 0) == 0 &&
+                             (item.size() == 7 || item[7] == ' ' || item[7] == '\t' || item[7] == '=');
+      if (isBinding && item.find('=') != std::string::npos) {
+        removed = true;
+      } else if (!item.empty()) {
+        if (!rebuilt.empty()) rebuilt += ", ";
+        rebuilt += item;
+      }
+
+      if (comma == std::string::npos) break;
+      itemStart = comma + 1;
+    }
+
+    if (!removed) {
+      position = close + 1;
+      continue;
+    }
+    if (rebuilt.empty()) {
+      // `layout(binding = N)` was the only qualifier. Keeping the empty list would leave `layout()`, which is not
+      // valid GLSL, so the whole qualifier goes. `position` stays put so the scan resumes at what followed it.
+      source.erase(position, close + 1 - position);
+      continue;
+    }
+    source.replace(open + 1, close - open - 1, rebuilt);
+    position = open + 1 + rebuilt.size();
+  }
+  return source;
+}
+
+/**
  * Maps an RHI descriptor binding type onto the capability that gates it.
  *
  * Declared here rather than in GlEnums.h because it is a device-level policy question - which
@@ -438,7 +511,11 @@ void GLDevice::probeCapabilities() {
   const bool hasDrawBuffers = api.glDrawBuffers != nullptr;
   const bool hasMultisampleResolve = api.glBlitFramebuffer != nullptr;
   const bool hasSampleShading = desktop ? gl41 : mPlatform.hasExtension("GL_OES_sample_shading");
-  const bool hasTimerQuery = desktop ? gl42 : mPlatform.hasExtension("GL_EXT_disjoint_timer_query");
+  // Timer queries are core in desktop 4.2, but `GL_ARB_timer_query` provides the same objects at 4.1 -- which is
+  // the highest version macOS offers. Without the extension check, every Apple device reports no timestamp support
+  // and GPU timing reads zero even though the driver implements the query.
+  const bool hasTimerQuery = desktop ? (gl42 || mPlatform.hasExtension("GL_ARB_timer_query"))
+                                     : mPlatform.hasExtension("GL_EXT_disjoint_timer_query");
   const bool hasFenceSync = api.glFenceSync != nullptr;
   const bool hasCubeArray = desktop ? gl41 : es32;
   // glBindFramebuffer-independent: separate sampler objects are core in desktop 3.3 and ES 3.0.
@@ -1747,20 +1824,43 @@ Result GLDevice::createShaderModule(const ShaderModuleDescriptor& descriptor, Sh
   //    0(5) : error C0000: ... or #extension GL_ARB_shading_language_420pack : enable`
   // So the directive is added here, at the one place every path funnels through, and only when the qualifier is
   // actually present and no directive is.
+  //
+  // ## Where the extension does not exist at all
+  //
+  // macOS's 4.1 driver advertises neither the extension nor a 4.20 compiler, and rejects the qualifier outright
+  // rather than treating the extension as a soft request. There the qualifier is stripped instead, because it is
+  // redundant: the bindings were already reflected from the SPIR-V, and the linked-program path assigns them with
+  // `glUniformBlockBinding` and `glUniform1i`. Before this, every canvas and effect shader failed to compile on
+  // macOS and the surfaces refused each frame. The check is the driver's extension list, not the presence of a
+  // directive, because SPIRV-Cross emits the directive whether or not the driver can honour it.
   // What the driver compiles is the translated GLSL whenever there is one. The author's source is kept for
   // diagnostics and reflection (a GLSL module was compiled to SPIR-V to get there), but it is written for the
   // compiler and not for this driver: a varying with `layout(location)` is required by SPIR-V and rejected by
   // GLSL ES 3.00, and the translator is the only place that distinction is resolved. Handing the author's text
   // to the driver instead made every effect shader fail on a device whose compiler enforces the ES 3.00 rule.
   std::string driverSource = module.generatedSource.empty() ? module.source : module.generatedSource;
-  if (mPlatform.context().dialect == GlDialect::Desktop &&
-      driverSource.find("layout(binding") != std::string::npos &&
-      driverSource.find("GL_ARB_shading_language_420pack") == std::string::npos) {
-    const size_t versionEnd = driverSource.find('\n');
-    // Directly after the `#version` line, which is the only position a directive may take. `enable` rather than
-    // `require`: a driver without the extension should warn and try, not refuse the module outright.
-    if (versionEnd != std::string::npos) {
-      driverSource.insert(versionEnd, "\n#extension GL_ARB_shading_language_420pack : enable");
+  const bool declaresBindings = driverSource.find("layout(binding") != std::string::npos ||
+                                driverSource.find("layout (binding") != std::string::npos;
+  if (mPlatform.context().dialect == GlDialect::Desktop && declaresBindings) {
+    if (!mPlatform.hasExtension("GL_ARB_shading_language_420pack")) {
+      driverSource = stripLayoutBindingQualifiers(std::move(driverSource));
+      // The directive SPIRV-Cross wrote cannot help a driver that does not have the extension; `require` would fail
+      // and `enable` only warns, so the line is removed rather than left to produce a diagnostic per shader.
+      size_t directive = driverSource.find("#extension GL_ARB_shading_language_420pack");
+      if (directive != std::string::npos) {
+        const size_t lineEnd = driverSource.find('\n', directive);
+        driverSource.erase(directive, lineEnd == std::string::npos ? std::string::npos : lineEnd - directive + 1);
+      }
+      emitMessage(MessageSeverity::Verbose,
+        "this driver has no GL_ARB_shading_language_420pack; stripped layout(binding) and will assign the "
+        "reflected binding points itself");
+    } else if (driverSource.find("GL_ARB_shading_language_420pack") == std::string::npos) {
+      const size_t versionEnd = driverSource.find('\n');
+      // Directly after the `#version` line, which is the only position a directive may take. `enable` rather than
+      // `require`: a driver without the extension should warn and try, not refuse the module outright.
+      if (versionEnd != std::string::npos) {
+        driverSource.insert(versionEnd, "\n#extension GL_ARB_shading_language_420pack : enable");
+      }
     }
   }
 
@@ -3215,6 +3315,14 @@ Result GLDevice::resetFence(const FenceHandle fenceHandle) {
 
 Result GLDevice::waitIdle() {
   if (!mInitialized) return Result::Success;
+
+  // GL entry points are per-thread state: a call from a thread with no current context is not a no-op, it is a
+  // call into the driver with nothing bound. On CGL that is a segfault rather than a GL error, which is what
+  // made `Surface::~Surface` crash when it called `waitIdle` from the thread that created the surface after
+  // the effect engine's render thread had made the context current. Making it current here is the same rule
+  // the other device entry points follow, and it lets an idle from any thread wait on the one context.
+  const Result current = mPlatform.makeCurrent();
+  if (!isSuccess(current)) return current;
 
   gl::GLApi& api = gl::getGLApi();
   if (api.glFinish != nullptr) {

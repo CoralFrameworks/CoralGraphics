@@ -15,11 +15,30 @@
 #   cmake --build build
 #   ctest --test-dir build --output-on-failure
 #
+#   # macOS (Command Line Tools; Ninja is optional)
+#   cmake -S . -B build -G "Unix Makefiles" -DCMAKE_BUILD_TYPE=Release
+#   cmake --build build -j8
+#   ctest --test-dir build --output-on-failure
+#
+#   # iOS simulator, from a macOS host with full Xcode (cross build; see README.md for the test commands)
+#   cmake -S . -B build-ios -G "Unix Makefiles" -DCMAKE_SYSTEM_NAME=iOS \
+#         -DCMAKE_SYSTEM_PROCESSOR=arm64 -DCMAKE_OSX_SYSROOT=iphonesimulator \
+#         -DCMAKE_OSX_ARCHITECTURES=arm64 -DCMAKE_OSX_DEPLOYMENT_TARGET=17.0 \
+#         -DCMAKE_BUILD_TYPE=Release
+#   cmake --build build-ios -j8
+#
 #   cmake -S examples -B build/examples -G Ninja -DCMAKE_BUILD_TYPE=Release
 #   cmake --build build/examples
 
 cmake_minimum_required(VERSION 3.19)
 project(CoralGraphics LANGUAGES CXX)
+
+# iOS has no CGL and no EGL: its context API, EAGL, is an Objective-C class, so the platform layer is one
+# Objective-C++ translation unit. The language is enabled only for that platform; a Windows or Linux
+# configure never names an Objective-C++ compiler.
+if (IOS)
+  enable_language(OBJCXX)
+endif ()
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)

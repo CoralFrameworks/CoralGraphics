@@ -63,6 +63,20 @@ size_t bytesPerPixel(const EffectPixelFormat format) noexcept {
   }
 }
 
+/** Reverses the row order of a tightly packed RGBA image in place. */
+void flipRows(std::vector<uint8_t>& pixels, const uint32_t width, const uint32_t height, const size_t bytesPerPixel) {
+  if (width == 0 || height < 2) return;
+  const size_t rowBytes = static_cast<size_t>(width) * bytesPerPixel;
+  std::vector<uint8_t> scratch(rowBytes);
+  for (uint32_t row = 0; row < height / 2; ++row) {
+    uint8_t* top = pixels.data() + static_cast<size_t>(row) * rowBytes;
+    uint8_t* bottom = pixels.data() + static_cast<size_t>(height - 1 - row) * rowBytes;
+    std::memcpy(scratch.data(), top, rowBytes);
+    std::memcpy(top, bottom, rowBytes);
+    std::memcpy(bottom, scratch.data(), rowBytes);
+  }
+}
+
 std::vector<uint8_t> transformPixels(const uint8_t* source, const uint32_t sourceWidth, const uint32_t sourceHeight,
                                      const EffectRotation rotation, const bool mirrorHorizontal,
                                      const bool mirrorVertical, const uint32_t outputWidth,
@@ -236,6 +250,16 @@ public:
     pending.bytes = bytes;
     pending.width = view.width;
     pending.height = view.height;
+    // `glReadPixels` numbers rows from the framebuffer's bottom-left, so an OpenGL readback arrives bottom-up while
+    // every consumer of an effect frame reads it top-down. The canvas renderer flips its own readback for this
+    // reason; without the same step here a vertically asymmetric input comes out mirrored, which is what made the
+    // two-input checkerboard case read the neighbouring square. Vulkan and Metal read back top-down already.
+    //
+    // The GPU output-scale pass is the exception: it renders its transform with the target's own orientation baked
+    // in, and `view.transformApplied` says that pass ran. Its result is already top-down when it reaches the buffer,
+    // so flipping it again would mirror the mirror and rotate the rotation.
+    pending.bottomUp =
+        !view.transformApplied && device != nullptr && device->getInfo().backend == backend::Backend::OpenGL;
     pending.transformedWidth = transformedWidth;
     pending.transformedHeight = transformedHeight;
     pending.outputWidth = outputWidth;
@@ -318,6 +342,7 @@ private:
     EffectRotation rotation = EffectRotation::None;
     bool mirrorHorizontal = false;
     bool mirrorVertical = false;
+    bool bottomUp = false;
     EffectFrame frame;
   };
 
@@ -352,14 +377,17 @@ private:
       return;
     }
 
-    std::vector<uint8_t> pixels;
-    if (pending.rotation == EffectRotation::None && !pending.mirrorHorizontal && !pending.mirrorVertical) {
-      pixels.resize(pending.bytes);
-      std::memcpy(pixels.data(), mapped, pending.bytes);
-    } else {
-      pixels = transformPixels(static_cast<const uint8_t*>(mapped), pending.width, pending.height,
-                               pending.rotation, pending.mirrorHorizontal, pending.mirrorVertical,
-                               pending.transformedWidth, pending.transformedHeight);
+    std::vector<uint8_t> pixels(pending.bytes);
+    std::memcpy(pixels.data(), mapped, pending.bytes);
+    const size_t pixelCount = static_cast<size_t>(pending.width) * pending.height;
+    const size_t pixelBytes = pixelCount != 0 ? pending.bytes / pixelCount : 4;
+    if (pending.bottomUp) {
+      flipRows(pixels, pending.width, pending.height, pixelBytes);
+    }
+    if (pending.rotation != EffectRotation::None || pending.mirrorHorizontal || pending.mirrorVertical) {
+      pixels = transformPixels(pixels.data(), pending.width, pending.height, pending.rotation,
+                               pending.mirrorHorizontal, pending.mirrorVertical, pending.transformedWidth,
+                               pending.transformedHeight);
     }
     if (pending.outputWidth != pending.transformedWidth || pending.outputHeight != pending.transformedHeight) {
       pixels = scaleNearest(pixels, pending.transformedWidth, pending.transformedHeight, pending.outputWidth,

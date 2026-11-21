@@ -1111,15 +1111,29 @@ RenderProgram* RenderCore::outputScaleProgram(const EffectRotation rotation, con
   if (mirrorHorizontal) body += "  t.x = 1.0 - t.x;\n";
   if (mirrorVertical) body += "  t.y = 1.0 - t.y;\n";
   body += "  vec2 s = t;\n";
+  // ## The rotation pair depends on which way the target's rows run
+  //
+  // `t` is built as `(uv.x, 1 - uv.y)`, and `uv` is bottom-up on every backend because the full-screen quad puts
+  // `v = 1` on the clip-space bottom. The sampling convention underneath it is not the same, though: a Vulkan or
+  // Metal target numbers its first row at the top, while an OpenGL target numbers it at the bottom. Stating the
+  // clockwise source point in the target's own coordinates therefore swaps the two formulas:
+  //
+  //   Vulkan/Metal (top-down targets):  source = (1 - t.y, t.x) for 90, (t.y, 1 - t.x) for 270
+  //   OpenGL (bottom-up targets):       source = (t.y, 1 - t.x) for 90, (1 - t.y, t.x) for 270
+  //
+  // The OpenGL pair is also what `ReadbackOutputNode::transformPixels` does for its CPU path, which is the check
+  // that says the GPU one is now the same transform rather than its inverse. `topDownTargets()` is the existing
+  // device property that distinguishes the two, so Vulkan's behaviour is unchanged by the OpenGL fix.
+  const bool topDown = topDownTargets();
   switch (rotation) {
     case EffectRotation::Clockwise90:
-      body += "  s = vec2(1.0 - t.y, t.x);\n";
+      body += topDown ? "  s = vec2(1.0 - t.y, t.x);\n" : "  s = vec2(t.y, 1.0 - t.x);\n";
       break;
     case EffectRotation::Clockwise180:
       body += "  s = vec2(1.0 - t.x, 1.0 - t.y);\n";
       break;
     case EffectRotation::Clockwise270:
-      body += "  s = vec2(t.y, 1.0 - t.x);\n";
+      body += topDown ? "  s = vec2(t.y, 1.0 - t.x);\n" : "  s = vec2(1.0 - t.y, t.x);\n";
       break;
     case EffectRotation::None:
     default:

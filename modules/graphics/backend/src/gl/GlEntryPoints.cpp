@@ -254,8 +254,10 @@ bool isRequired(const backend::GlDialect dialect, const char* name) {
       "glTexStorage3D",
       "glGenerateMipmap",
       "glGetStringi",
-      "glDrawBuffers",
-      "glSampleMaski"
+      "glDrawBuffers"
+      // glSampleMaski is ES 3.1, not 3.0. The draw path already checks it before use, so an ES 3.0
+      // driver without it is a device that cannot set a sample mask -- not one that cannot render.
+      // Apple's ES 3.0 context is exactly that case, and requiring the symbol refused the device.
       // clang-format on
     };
     return inList(kEsOnly, sizeof(kEsOnly) / sizeof(kEsOnly[0]), name);

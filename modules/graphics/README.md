@@ -101,7 +101,8 @@ modules/graphics/
     │       └── platform/           # the platform implementation(s) this target needs
     │           ├── GlPlatformWin32.cpp #   WGL
     │           ├── GlPlatformGlx.cpp   #   GLX (X11)
-    │           ├── GlPlatformEgl.cpp   #   EGL (Android, iOS; Wayland on Linux)
+    │           ├── GlPlatformEgl.cpp   #   EGL (Android; Wayland on Linux)
+    │           ├── GlPlatformEagl.mm   #   EAGL (iOS, Objective-C++)
     │           ├── GlPlatformLinux.cpp #   Linux dispatcher: GLX/EGL per surface
     │           ├── GlPlatformCgl.cpp   #   CGL
     │           └── GlPlatformNull.cpp  #   no window system; reports Unsupported
@@ -239,6 +240,24 @@ macOS, OpenGL ES 3.0+ on Android and iOS. `getPlatformGlDialect()` reports it, a
 New code should branch on a capability or on the presence of an entry point rather than on the dialect
 name wherever that is possible; see `docs/backend/OpenGLBackend.md` §7.
 
+**macOS.** CGL provides the context (`GlPlatformCgl.cpp`), and 4.1 core is the ceiling -- Apple stopped
+at that version. Two details follow from it. The driver has no `GL_ARB_shading_language_420pack`, so
+`layout(binding = N)` is illegal even though the SPIR-V reflection carries the binding points; the
+backend strips the qualifier for such a driver and assigns the reflected points itself with
+`glUniformBlockBinding` and `glUniform1i`, which it already had to do for the samplers and blocks whose
+translation omitted the qualifier. Timer queries are core only from 4.2, but `GL_ARB_timer_query`
+provides them at 4.1, so that extension is what the capability check accepts. The deprecated framework
+is compiled with `GL_SILENCE_DEPRECATION`: it still works, and every CGL call otherwise carries an
+availability warning about a decision the backend has already made.
+
+**iOS.** iOS has neither CGL nor EGL; its context API is EAGL, and `EAGLContext` is Objective-C. The
+platform layer is therefore one Objective-C++ translation unit (`GlPlatformEagl.mm`), enabled only for
+an iOS configure. It creates a 3.0 context, hands back the OpenGLES framework's symbols as the entry
+point loader, and reports itself headless: an offscreen device renders into the backend's framebuffer
+objects, while attaching the context to a `CAEAGLLayer` for presentation belongs to the view layer.
+`glSampleMaski` is ES 3.1 rather than 3.0 and is optional in the entry point table; requiring it refused
+Apple's ES 3.0 context at device creation even though the draw path already checks for it.
+
 **Errors.** Every operation that can fail returns `Result`. Nothing throws across the API boundary,
 including from SPIRV-Cross, whose `CompilerError` is caught in `ShaderCross.cpp` and turned into
 `Result::ShaderCompilationFailed`. There are no output parameters that are left unset on failure: an
@@ -312,19 +331,37 @@ builds `graphics`, `effect` and their dependencies on their own, which turns a b
 minute into a few seconds:
 
 ```shell
+# Windows
 cmake -S . -B build/graphic -G "Visual Studio 17 2022" -A x64
 cmake --build build/graphic --config Debug
 ./build/graphic/modules/graphics/Debug/test_graphics          # the facade
 ./build/graphic/modules/graphics/backend/Debug/test_backend   # the implementation
 ./build/graphic/modules/graphics/geometry/Debug/test_geometry # the value types
+
+# macOS (single-config generator: no Debug directory in the paths)
+cmake -S . -B build/graphic -G "Unix Makefiles" -DCMAKE_BUILD_TYPE=Debug
+cmake --build build/graphic -j8
+./build/graphic/modules/graphics/test_graphics          # the facade
+./build/graphic/modules/graphics/backend/test_backend   # the implementation
+./build/graphic/modules/graphics/geometry/test_geometry # the value types
 ```
+
+On macOS `test_backend` creates its offscreen device through CGL and reports `OpenGL 4.1 core`, the
+highest version Apple implements; the Vulkan cases skip because the system has no Vulkan loader. The
+device-free suites still run on a machine with no graphics stack, which is what keeps a CI job useful
+there: only the cases whose subject is a real context are skipped.
 
 A standalone configure uses this repository's bundled submodules for libz, libyuv and libgtest, so the
 only preparation is initializing them:
 
 ```shell
 git submodule update --init --recursive
+
+# Windows
 cmake -S . -B build/graphic -G "Visual Studio 17 2022" -A x64
+
+# macOS
+cmake -S . -B build/graphic -G "Unix Makefiles" -DCMAKE_BUILD_TYPE=Release
 ```
 
 A project that keeps the three elsewhere can pass `-DCORAL_SHARED_THIRD_PARTY_DIR=<application third_party>`.
@@ -332,8 +369,10 @@ A project that keeps the three elsewhere can pass `-DCORAL_SHARED_THIRD_PARTY_DI
 Every suite is registered with CTest, so it can be run by name or all at once from the build root:
 
 ```shell
-ctest --test-dir build/graphic -C Debug                       # all of them
-ctest --test-dir build/graphic -C Debug -R test_geometry      # one, by regular expression
+ctest --test-dir build/graphic -C Debug                                              # Windows, all of them
+ctest --test-dir build/graphic -C Debug -R test_geometry                             # Windows, one by regex
+ctest --test-dir build/graphic -R "test_(graphics|backend|geometry)" --output-on-failure  # macOS/Linux
+ctest --test-dir build/graphic -R test_geometry --output-on-failure                  # macOS/Linux, one
 ```
 
 Use `ctest` in preference to invoking an executable directly. A suite that is built but not registered still runs when
@@ -941,12 +980,12 @@ than by reading it.
 
 ### Checking the platform-only code without a device or a Linux box
 
-Five sources in this library are compiled only on a platform a Windows host is not:
+Several sources in this library are compiled only on a platform a Windows host is not:
 
 | Platform | Sources | Selected by |
 |---|---|---|
 | Android | `src/codec/AndroidCodec.cpp` and the codec dispatch around it; `GlPlatformEgl.cpp` | `ANDROID` |
-| iOS | `GlPlatformEgl.cpp` again, with the Android window-size query compiled out | `IOS` |
+| iOS | `GlPlatformEagl.mm` (EAGL; Objective-C++) | `IOS` |
 | Linux | `GlPlatformGlx.cpp` | `LINUX` |
 | macOS | `GlPlatformCgl.cpp` | `APPLE AND NOT IOS` |
 
@@ -969,16 +1008,17 @@ with the wrong arguments, or to a name that does not exist, fails here exactly a
 applies elsewhere: `CGLContextObj` is a pointer to an incomplete struct rather than `void*`, and `glXGetProcAddressARB`
 returns a function pointer rather than `void*`, because a looser stub would hide exactly the mistakes worth finding.
 
-The script checks five configurations, and the second is the one that catches what compiling alone cannot:
+The script checks four configurations, and the second is the one that catches what compiling alone cannot:
 
 1. **Android compiles.** All three Android sources, under the Android definitions, with no vendored library reachable.
 2. **Nothing absent is called.** `/Zs` type-checks without linking, so an unguarded call to `decodePng` -- a function
    Android does not compile -- would pass step 1 and fail on a device with an undefined symbol. The script counts each
    vendored decoder's references in the preprocessed output and expects exactly one, the declaration in the private
    header, against two on a host build where the call is also present.
-3. **Linux compiles** (`GlPlatformGlx.cpp`, against the Xlib and GLX stubs) and **iOS compiles** (the same EGL source,
-   with the one Android-only block removed).
-4. **macOS compiles** (`GlPlatformCgl.cpp`, against the CGL stubs).
+3. **Linux compiles** (`GlPlatformGlx.cpp`, against the Xlib and GLX stubs).
+4. **macOS compiles** (`GlPlatformCgl.cpp`, against the CGL stubs). iOS is not in this check: its platform layer
+   is Objective-C++ against `EAGLContext`, so it is verified by an actual iOS build (`build-ios` below) rather
+   than by a Windows-host stub.
 
 This has already paid for itself three times over. It found that **the GLX platform could not compile on Linux at
 all** -- an `#undef None` copied from the Win32 file removed the attribute-list terminator before four lists that end
@@ -1070,10 +1110,20 @@ The demos are a separate project at the root, `examples/`, so the framework buil
 tests. One configure builds every demo for the host:
 
 ```sh
+# Windows
 cmake -S examples -B out/examples -G "Visual Studio 17 2022" -A x64
 cmake --build out/examples --config Release
 out/examples/bin/Release/graphics_demo.exe --resources modules/graphics/resources --output demo.png
+
+# macOS
+cmake -S examples -B out/examples -G "Unix Makefiles" -DCMAKE_BUILD_TYPE=Release
+cmake --build out/examples -j8
+ctest --test-dir out/examples --output-on-failure
 ```
+
+On macOS the examples project builds the effect demos only (`effect_demo` is the offscreen OpenGL
+check, `effect_benchmark` the timing one); `examples/graphics/` has no macOS window implementation, so
+the PNG-writing `graphics_demo` and the windowed players are not built there.
 
 A configure outside the application tree uses this repository's bundled submodules for libz, libyuv and
 libgtest; the dependency manifest in `cmake/CoralGraphicsDependencies.cmake` documents the resolution

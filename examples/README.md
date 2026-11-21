@@ -31,7 +31,12 @@ Two checkouts have to be initialized:
 
   ```sh
   git submodule update --init --recursive
+
+  # Windows
   cmake -S examples -B out/examples -G "Visual Studio 17 2022" -A x64
+
+  # macOS
+  cmake -S examples -B out/examples -G "Unix Makefiles" -DCMAKE_BUILD_TYPE=Release
   ```
 
   To use a different copy instead of the bundled submodules, pass
@@ -44,17 +49,34 @@ On Linux the X11/Wayland demos additionally need `libx11-dev`, `libwayland-dev`,
 ## Building and running
 
 ```sh
+# Windows
 cmake -S examples -B out/examples -G "Visual Studio 17 2022" -A x64
 cmake --build out/examples --config Release
 
 out/examples/bin/Release/graphics_demo.exe --resources modules/graphics/resources --output demo.png
 out/examples/bin/Release/vulkan_demo.exe --verify --output out/vulkan
 out/examples/bin/Release/lottie_player.exe --animation modules/graphics/resources/apitest/lottie/gear.json
+
+# macOS
+cmake -S examples -B out/examples -G "Unix Makefiles" -DCMAKE_BUILD_TYPE=Release
+cmake --build out/examples -j8
+ctest --test-dir out/examples --output-on-failure
 ```
 
 `graphics_demo` writes a PNG rather than opening a window, so it runs on a build machine, in a
 container, or in a session with no display. The windowed programs and the effect demos are where a
 display or a GPU is the subject.
+
+On macOS the demo project builds `effect_demo` and `effect_benchmark` from `effect/`, and those two
+are the whole demo set: `examples/graphics/` selects its demo by host platform and only has a Windows
+and a Linux implementation, so there is no `graphics_demo` or `lottie_player` to run on a Mac yet.
+`effect_demo` brings up an offscreen device through the OpenGL backend (CGL, 4.1 core) and exits 77
+when it cannot, which is the same skip the other GPU checks use.
+
+An iOS cross build produces the same `effect_demo` and `effect_benchmark` as `.app` bundles, over the
+OpenGL ES 3.0 / EAGL backend. They are run through the simulator:
+`xcrun simctl spawn booted out/ios/bin/effect_demo.app/effect_demo`. The windowed `examples/graphics`
+demos are Windows and Linux only, as on macOS.
 
 ## Verification
 
@@ -70,10 +92,16 @@ registered:
 | `effect_x11_demo`, `effect_wayland_demo` | the Linux outputs |
 
 A check whose subject is unavailable returns **77**, which CTest reports as a skip: no Vulkan device,
-no X server, no compositor. Run them with
+no X server, no compositor. On macOS the effect demo and the effect module's own suites run against
+the OpenGL backend; the Vulkan and windowed checks are not part of the macOS demo build. Run the
+registered checks with
 
 ```sh
+# Windows (multi-config generators need the configuration)
 ctest --test-dir out/examples -C Release --output-on-failure
+
+# macOS and Linux (single-config generators)
+ctest --test-dir out/examples --output-on-failure
 ```
 
 ## Options

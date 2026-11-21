@@ -148,7 +148,11 @@ if (CORAL_BACKEND_SUPPORTS_OPENGL)
     list(APPEND SRCS src/gl/platform/GlPlatformWin32.cpp)
   elseif (APPLE AND NOT IOS)
     list(APPEND SRCS src/gl/platform/GlPlatformCgl.cpp)
-  elseif (ANDROID OR IOS)
+  elseif (IOS)
+    # iOS has no EGL: EAGL is its context API. The source is Objective-C++ because `EAGLContext` is; the root
+    # project enables that language for iOS only.
+    list(APPEND SRCS src/gl/platform/GlPlatformEagl.mm)
+  elseif (ANDROID)
     list(APPEND SRCS src/gl/platform/GlPlatformEgl.cpp)
   elseif (LINUX)
     # One binary, two window systems: GLX for X11 and EGL for Wayland (and the surfaceless fallback).
@@ -373,6 +377,12 @@ elseif (IOS)
 elseif (APPLE)
   find_library(OPENGL_FRAMEWORK OpenGL REQUIRED)
   target_link_libraries(${TARGET} PUBLIC $<BUILD_INTERFACE:${OPENGL_FRAMEWORK}>)
+  # Apple has deprecated OpenGL since 10.14 but still ships a working 4.1 core driver, which is the highest
+  # version the desktop dialect targets. The deprecation attribute on every CGL call is noise about a
+  # decision this backend has already made, so it is silenced for the backend and its tests rather than
+  # repeated as a hundred warnings. The global flags suppress `-Wdeprecated-declarations` but the SDK's
+  # `OPENGL_DEPRECATED` attribute needs this define to stay quiet.
+  target_compile_definitions(${TARGET} PUBLIC GL_SILENCE_DEPRECATION=1)
 elseif (LINUX)
   find_package(OpenGL QUIET)
   if (OPENGL_FOUND)
