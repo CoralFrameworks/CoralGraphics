@@ -30,6 +30,12 @@
 #include "private/backend/vulkan/VulkanDevice.h"
 #endif
 
+#if CORAL_BACKEND_HAS_METAL
+// A plain C++ header: the Metal implementation is Objective-C++ and must not leak Metal types into this translation
+// unit. See MetalFactory.h.
+#include "private/backend/metal/MetalFactory.h"
+#endif
+
 namespace backend {
 namespace {
 
@@ -179,11 +185,18 @@ Result createBackendDevice(const Backend backend, const DeviceConfiguration& con
 #endif
     }
 
-    case Backend::Metal:
+    case Backend::Metal: {
+#if CORAL_BACKEND_HAS_METAL
+      // The construction lives in MetalDevice.mm, behind a C++ factory, because this translation unit cannot include a
+      // header that imports Metal. The ownership handover is the same as the two branches above.
+      return metal::createMetalDevice(configuration, outDevice);
+#else
+      return Result::Unsupported;
+#endif
+    }
+
     case Backend::Null:
-      // Not implemented yet. The RHI's public API is deliberately shaped so that each of these is a
-      // translation of the same resource and command-buffer model rather than a redesign; see
-      // docs/backend/BackendMatrix.md for the mapping each one needs.
+      // Not implemented, and not expected: `Null` is the factory's "no preference" sentinel, never a device.
       return Result::Unsupported;
   }
   return Result::Unsupported;

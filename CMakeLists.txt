@@ -81,6 +81,13 @@ option(CORAL_GRAPHICS_SUPPORTS_FONTS "Build the font stack" ON)
 option(CORAL_GRAPHICS_SUPPORTS_JSON "Build the JSON/Lottie reader" ON)
 option(CORAL_BACKEND_SUPPORTS_OPENGL "Build the OpenGL backend" ON)
 option(CORAL_BACKEND_SUPPORTS_VULKAN "Build the Vulkan backend" ON)
+# Metal is an Apple-only backend, so its default follows the platform rather than the project. Turning it on elsewhere
+# is refused at configure time by modules/graphics/backend/CMakeLists.txt rather than by a link failure.
+if (APPLE)
+  option(CORAL_BACKEND_SUPPORTS_METAL "Build the Metal backend" ON)
+else ()
+  option(CORAL_BACKEND_SUPPORTS_METAL "Build the Metal backend" OFF)
+endif ()
 option(CORAL_BACKEND_SUPPORTS_SPIRV_CROSS "Build SPIRV-Cross" ON)
 option(CORAL_BACKEND_SUPPORTS_SHADERC "Build shaderc" ON)
 option(CORAL_SUPPORTS_FFMPEG "Build FFmpeg integration" OFF)

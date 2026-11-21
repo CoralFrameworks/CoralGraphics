@@ -35,9 +35,9 @@
  * |---|---|---|
  * | Windows | desktop 4.1+ | OpenGL |
  * | Linux | desktop 4.1+ | OpenGL |
- * | macOS | desktop 4.1+ | OpenGL, Metal (once implemented) |
+ * | macOS | desktop 4.1+ | Metal, OpenGL |
  * | Android | ES 3.0+ | OpenGL, Vulkan (once implemented) |
- * | iOS | ES 3.0+ | OpenGL, Metal (once implemented) |
+ * | iOS | ES 3.0+ | Metal, OpenGL ES |
  *
  * A backend that is compiled in but not implemented yet is skipped with a reason rather than failed;
  * one that is implemented but cannot come up **is** a failure, because that is what a user would hit.
@@ -109,17 +109,22 @@ class PlatformRunner {
     constexpr const char* kGlName = "OpenGL 4.1+";
 #endif
 
+    // Metal first on Apple: it is the platform's preferred backend, and the order also matters to the
+    // tests themselves. A `forEachExpectedBackend` test that reaches a backend which cannot be created
+    // skips the rest of the test, so a backend listed after such a one is never exercised. Metal is the
+    // one this build is expected to deliver, so it goes first.
+    if (isBackendAvailable(Backend::Metal)) {
+      expected.push_back(ExpectedBackend{ Backend::Metal, "Metal", GlDialect::ES, true });
+    }
     if (isBackendAvailable(Backend::OpenGL)) {
       expected.push_back(ExpectedBackend{ Backend::OpenGL, kGlName, kDialect, true });
     }
 
     // Listed when the build supports them, so that enabling one immediately gets it exercised rather
-    // than silently untested.
+    // than silently untested. Vulkan stays last and stays `implemented = false`: it is compiled in on
+    // macOS but the system ships no loader, which is a machine property rather than a backend regression.
     if (isBackendAvailable(Backend::Vulkan)) {
       expected.push_back(ExpectedBackend{ Backend::Vulkan, "Vulkan 1.0", kDialect, false });
-    }
-    if (isBackendAvailable(Backend::Metal)) {
-      expected.push_back(ExpectedBackend{ Backend::Metal, "Metal", GlDialect::ES, false });
     }
     return expected;
   }
@@ -973,9 +978,9 @@ TEST(PlatformRunner, QueueSubmitWithFenceCanOverlapTheGpu) {
 
 TEST(PlatformRunner, MultisampleResolveProducesTheDrawnColour) {
   forEachExpectedBackend([](const ExpectedBackend& expected) {
-    // The OpenGL backend's MSAA resolve is a different path; this test exists for the Vulkan resolve
-    // attachment (dynamic rendering) and the `vkCmdResolveImage` fallback used on 1.0/1.1 devices.
-    if (expected.backend != Backend::Vulkan) {
+    // The Vulkan resolve attachment (dynamic rendering) and the `vkCmdResolveImage` fallback, and Metal's
+    // `MTLStoreActionMultisampleResolve`. The OpenGL backend resolves by a blit, which this test does not model.
+    if (expected.backend != Backend::Vulkan && expected.backend != Backend::Metal) {
       return;
     }
 

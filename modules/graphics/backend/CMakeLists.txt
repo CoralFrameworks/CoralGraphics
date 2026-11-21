@@ -40,6 +40,22 @@ if (NOT DEFINED CORAL_BACKEND_SUPPORTS_VULKAN)
   option(CORAL_BACKEND_SUPPORTS_VULKAN "Build the Vulkan backend for the RHI" OFF)
 endif ()
 
+# Metal is the third backend and the only Apple-only one. Its default is "on where it can work": a macOS or iOS build
+# with the Metal backend compiled out is a build that has to select the deprecated OpenGL path on hardware that has
+# Metal, which is not what a default should do. A non-Apple configure forces it off rather than failing, because the
+# option is also set by the application's root and a Windows tree should not inherit an error from it.
+if (NOT DEFINED CORAL_BACKEND_SUPPORTS_METAL)
+  if (APPLE)
+    option(CORAL_BACKEND_SUPPORTS_METAL "Build the Metal backend for the RHI" ON)
+  else ()
+    option(CORAL_BACKEND_SUPPORTS_METAL "Build the Metal backend for the RHI" OFF)
+  endif ()
+endif ()
+if (CORAL_BACKEND_SUPPORTS_METAL AND NOT APPLE)
+  message(STATUS "CORAL_BACKEND_SUPPORTS_METAL is off: Metal exists only on Apple platforms")
+  set(CORAL_BACKEND_SUPPORTS_METAL OFF)
+endif ()
+
 if (NOT DEFINED CORAL_BACKEND_SUPPORTS_SPIRV_CROSS)
   if (EXISTS ${EXTERNAL}/SPIRV-Cross/spirv_glsl.cpp)
     option(CORAL_BACKEND_SUPPORTS_SPIRV_CROSS "Build SPIRV-Cross so the RHI can consume SPIR-V shaders" ON)
@@ -61,8 +77,8 @@ if (NOT DEFINED CORAL_BACKEND_SUPPORTS_SHADERC)
   endif ()
 endif ()
 
-if (NOT CORAL_BACKEND_SUPPORTS_OPENGL AND NOT CORAL_BACKEND_SUPPORTS_VULKAN)
-  message(FATAL_ERROR "No RHI backend was selected; enable CORAL_BACKEND_SUPPORTS_OPENGL")
+if (NOT CORAL_BACKEND_SUPPORTS_OPENGL AND NOT CORAL_BACKEND_SUPPORTS_VULKAN AND NOT CORAL_BACKEND_SUPPORTS_METAL)
+  message(FATAL_ERROR "No RHI backend was selected; enable CORAL_BACKEND_SUPPORTS_OPENGL, _VULKAN or _METAL")
 endif ()
 
 # ## Vulkan needs shaderc, so the two options are not independent
@@ -78,6 +94,25 @@ if (CORAL_BACKEND_SUPPORTS_VULKAN AND NOT CORAL_BACKEND_SUPPORTS_SHADERC)
       "CORAL_BACKEND_SUPPORTS_VULKAN requires CORAL_BACKEND_SUPPORTS_SHADERC=ON: the Vulkan backend consumes SPIR-V and "
       "has no way to produce it from GLSL source. Either drop -DCORAL_BACKEND_SUPPORTS_SHADERC=OFF, or configure with "
       "-DCORAL_BACKEND_SUPPORTS_VULKAN=OFF to build the OpenGL backend, which does not need shaderc.")
+endif ()
+
+# ## Metal has the same dependency, one translation further along
+#
+# A Metal shader is MSL, and the only MSL this tree produces comes from SPIR-V through SPIRV-Cross's MSL backend. The
+# module a caller hands the RHI is either SPIR-V already, or GLSL that shaderc has to turn into it first -- so Metal
+# needs both toolchains, for the same reason Vulkan needs shaderc and one more. Refused here, where the message can
+# name both options, rather than at the first shader.
+if (CORAL_BACKEND_SUPPORTS_METAL AND NOT CORAL_BACKEND_SUPPORTS_SPIRV_CROSS)
+  message(FATAL_ERROR
+      "CORAL_BACKEND_SUPPORTS_METAL requires CORAL_BACKEND_SUPPORTS_SPIRV_CROSS=ON: Metal consumes MSL, which this "
+      "tree produces by translating SPIR-V with SPIRV-Cross's MSL backend. Configure with "
+      "-DCORAL_BACKEND_SUPPORTS_SPIRV_CROSS=ON, or with -DCORAL_BACKEND_SUPPORTS_METAL=OFF.")
+endif ()
+if (CORAL_BACKEND_SUPPORTS_METAL AND NOT CORAL_BACKEND_SUPPORTS_SHADERC)
+  message(FATAL_ERROR
+      "CORAL_BACKEND_SUPPORTS_METAL requires CORAL_BACKEND_SUPPORTS_SHADERC=ON: a GLSL shader module has to become "
+      "SPIR-V before SPIRV-Cross can translate it to MSL. Configure with -DCORAL_BACKEND_SUPPORTS_SHADERC=ON, or with "
+      "-DCORAL_BACKEND_SUPPORTS_METAL=OFF.")
 endif ()
 
 # ==================================================================================================
@@ -113,6 +148,15 @@ if (CORAL_BACKEND_SUPPORTS_VULKAN)
       ${PRIVATE_HDR_DIR}/backend/vulkan/VulkanEntryPoints.h
       ${PRIVATE_HDR_DIR}/backend/vulkan/VulkanPlatform.h
       ${PRIVATE_HDR_DIR}/backend/vulkan/VulkanX11Compat.h
+  )
+endif ()
+
+if (CORAL_BACKEND_SUPPORTS_METAL)
+  list(APPEND PRIVATE_HDRS
+      ${PRIVATE_HDR_DIR}/backend/metal/MetalCommandBuffer.h
+      ${PRIVATE_HDR_DIR}/backend/metal/MetalDevice.h
+      ${PRIVATE_HDR_DIR}/backend/metal/MetalEnums.h
+      ${PRIVATE_HDR_DIR}/backend/metal/MetalFactory.h
   )
 endif ()
 
@@ -223,10 +267,45 @@ if (CORAL_BACKEND_SUPPORTS_VULKAN)
   endif ()
 endif ()
 
+# --------------------------------------------------------------------------------------------------
+# Metal
+# --------------------------------------------------------------------------------------------------
+# Six Objective-C++ translation units, because every resource payload holds an ARC-managed Metal object and the
+# compiler is the only thing that can generate the release. The split mirrors the Vulkan backend's: lifecycle and
+# capabilities, resources and pipelines, command recording, presentation, enum translation, and the SPIR-V -> MSL pass.
+if (CORAL_BACKEND_SUPPORTS_METAL)
+  list(APPEND SRCS
+      src/metal/MetalCommandBuffer.mm
+      src/metal/MetalCross.h
+      src/metal/MetalCross.mm
+      src/metal/MetalDevice.mm
+      src/metal/MetalEnums.mm
+      src/metal/MetalPresentation.mm
+      src/metal/MetalResources.mm
+  )
+endif ()
+
 # ==================================================================================================
 # Definition and includes
 # ==================================================================================================
 add_library(${TARGET} STATIC ${PUBLIC_HDRS} ${PRIVATE_HDRS} ${SRCS})
+
+if (CORAL_BACKEND_SUPPORTS_METAL)
+  # ## ARC for the Metal sources only
+  #
+  # The OpenGL backend's EAGL platform layer is Objective-C++ written against manual retain/release, so the flag cannot
+  # go on the target. Attaching it per source keeps the two styles from colliding and makes "a Metal payload releases
+  # itself" a property of the files that hold Metal objects rather than of the whole library.
+  set(CORAL_METAL_SRCS
+      ${SRC_DIR}/metal/MetalCommandBuffer.mm
+      ${SRC_DIR}/metal/MetalCross.mm
+      ${SRC_DIR}/metal/MetalDevice.mm
+      ${SRC_DIR}/metal/MetalEnums.mm
+      ${SRC_DIR}/metal/MetalPresentation.mm
+      ${SRC_DIR}/metal/MetalResources.mm
+  )
+  set_source_files_properties(${CORAL_METAL_SRCS} PROPERTIES COMPILE_OPTIONS "-fobjc-arc")
+endif ()
 
 # See the note in modules/effect/CMakeLists.txt: on a localized MSVC toolchain ninja records no header dependencies,
 # so they are declared here instead. Coarse (a header change rebuilds this library) but correct, and confined to
@@ -319,6 +398,12 @@ if (CORAL_BACKEND_SUPPORTS_OPENGL)
   target_compile_definitions(${TARGET} PUBLIC CORAL_BACKEND_HAS_OPENGL=1)
 endif ()
 
+if (CORAL_BACKEND_SUPPORTS_METAL)
+  target_compile_definitions(${TARGET} PUBLIC CORAL_BACKEND_HAS_METAL=1)
+else ()
+  target_compile_definitions(${TARGET} PUBLIC CORAL_BACKEND_HAS_METAL=0)
+endif ()
+
 if (CORAL_BACKEND_SUPPORTS_VULKAN)
   target_compile_definitions(${TARGET} PUBLIC CORAL_BACKEND_HAS_VULKAN=1)
 else ()
@@ -400,6 +485,20 @@ elseif (LINUX)
   target_link_libraries(${TARGET} PUBLIC ${CMAKE_DL_LIBS})
 endif ()
 
+# Metal and the frameworks it needs. `QuartzCore` is CAMetalLayer's home; `Foundation` provides NSString/NSError, which
+# the diagnostics and the shader compiler use. Linked PUBLIC because the private headers import Metal, and a consumer of
+# `backend` that includes one of them (the backend's own tests do) needs the same link line.
+if (CORAL_BACKEND_SUPPORTS_METAL)
+  find_library(METAL_FRAMEWORK Metal REQUIRED)
+  find_library(QUARTZCORE_FRAMEWORK QuartzCore REQUIRED)
+  find_library(FOUNDATION_FRAMEWORK Foundation REQUIRED)
+  target_link_libraries(${TARGET} PUBLIC
+      $<BUILD_INTERFACE:${METAL_FRAMEWORK}>
+      $<BUILD_INTERFACE:${QUARTZCORE_FRAMEWORK}>
+      $<BUILD_INTERFACE:${FOUNDATION_FRAMEWORK}>
+  )
+endif ()
+
 # ==================================================================================================
 # Installation
 # ==================================================================================================
@@ -433,6 +532,12 @@ if (CORAL_BUILD_TESTS)
       tests/test_Validation.cpp
   )
   target_link_libraries(test_${TARGET} PRIVATE ${TARGET} gtest)
+
+  # The MSL translation's own suite. It is device-free -- SPIRV-Cross and a string -- but it can only link when the MSL
+  # backend was compiled in, so it is added only for a Metal build.
+  if (CORAL_BACKEND_SUPPORTS_METAL)
+    target_sources(test_${TARGET} PRIVATE tests/test_MetalCross.cpp)
+  endif ()
 
   # ShaderCross.h is a private header of the library, but the tests exercise the SPIR-V translation
   # path directly: it is the piece most likely to break silently when SPIRV-Cross is updated, and a

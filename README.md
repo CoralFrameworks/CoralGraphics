@@ -59,12 +59,25 @@ after the initial checkout.
 
 On macOS the prerequisites are the Xcode Command Line Tools (`xcode-select --install`, which also
 provides the Python 3 the shader-embedding step uses) and CMake 3.19 or newer (Homebrew's `cmake`, or
-the CMake.app bundle). The OpenGL backend is the system driver: CGL creates an OpenGL 4.1 core context,
-which is the highest version Apple provides and the desktop dialect the RHI targets. Vulkan is compiled
-in but the system has no Vulkan loader, so the Vulkan cases skip themselves rather than fail, and the
-OpenGL cases are the ones that run. `test_backend` prints the negotiated device (for example
-`Apple M...`, `OpenGL 4.1 core`, `CGL`) and its extension list, which is the quickest way to confirm
-the context is real.
+the CMake.app bundle). **Metal is the default backend**: `CORAL_BACKEND_SUPPORTS_METAL` is on for an
+Apple configure, SPIR-V shaders are translated to MSL with SPIRV-Cross, and the OpenGL backend remains
+compiled in as the fallback. Vulkan is compiled in but the system has no Vulkan loader, so the Vulkan
+cases skip themselves rather than fail. `test_backend` prints the negotiated device for every backend
+it can create (`Apple M...` / `Metal 2.2+` / `coral/backend/metal`, and `OpenGL 4.1 core` / `CGL`) which
+is the quickest way to confirm both are real:
+
+```sh
+# The Metal backend on its own, the way a regression run pins it
+CORAL_RHI_BACKEND=metal ./build/modules/graphics/backend/test_backend
+CORAL_RHI_BACKEND=opengl ./build/modules/graphics/backend/test_backend
+
+# The whole suite, macOS
+ctest --test-dir build -R "test_(graphics|backend|geometry)|effect_(demo|public_header_boundary)" \
+      --output-on-failure
+```
+
+`modules/graphics/backend/src/metal/` holds the implementation and
+`Metal后端实现进度与问题记录.md` records its status, its design decisions and what it does not do yet.
 
 The macOS `ctest` line names this repository's suites rather than running everything: a standalone
 tree also registers the vendored libjpeg-turbo command-line tests, whose executables the codec wrapper
@@ -75,8 +88,9 @@ CoralGraphics check -- facade, backend, geometry, effect, shader/fuzz smoke and 
 ### iOS
 
 iOS is a cross build from a macOS host with full Xcode (the Command Line Tools alone have no iOS SDK).
-Its OpenGL backend is OpenGL ES 3.0 through EAGL, not EGL, so the platform layer is
-`GlPlatformEagl.mm`; an offscreen device needs no window and the tests run in the simulator.
+Its default backend is Metal (`CAMetalLayer` for presentation, `MTLDevice` for everything else), and its
+OpenGL backend is OpenGL ES 3.0 through EAGL, not EGL, so that platform layer is `GlPlatformEagl.mm`; an
+offscreen device needs no window and the tests run in the simulator.
 
 ```sh
 # The build-time shader compiler is a host tool. Build it in the host tree first so the iOS build

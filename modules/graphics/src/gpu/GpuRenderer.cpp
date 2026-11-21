@@ -921,7 +921,11 @@ namespace {
  * descriptor sets to decorate, and the OpenGL backend consumes the module through SPIRV-Cross).
  */
 bool usesVulkanShaderSet(const backend::Device* device) noexcept {
-  return device != nullptr && device->getInfo().backend == backend::Backend::Vulkan;
+  if (device == nullptr) return false;
+  const backend::Backend selected = device->getInfo().backend;
+  // Metal consumes the same set for the same reason Vulkan does: its `(set, binding)` assignments are read from the
+  // SPIR-V decorations, and the OpenGL set has none (that environment emits no DescriptorSet/Binding decorations).
+  return selected == backend::Backend::Vulkan || selected == backend::Backend::Metal;
 }
 
 /**
