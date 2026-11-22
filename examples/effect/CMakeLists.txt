@@ -52,6 +52,30 @@ else ()
 endif ()
 
 # ==================================================================================================
+# macOS: the offscreen cross-backend verification
+# ==================================================================================================
+# `effect_demo` next door proves the graph runs; this proves the picture is right and that the backends agree. It is
+# registered three times: once as the whole-machine check and once per backend, so a failure names the backend without
+# a reader having to parse the combined output. A backend this machine cannot bring up exits 77, which CTest reports as
+# a skip -- the same contract the other GPU checks use.
+if (APPLE AND NOT IOS)
+  add_executable(effect_mac_demo effect_mac_demo.cpp EffectVerification.cpp)
+  target_link_libraries(effect_mac_demo PRIVATE effect)
+  set_target_properties(effect_mac_demo PROPERTIES
+      FOLDER Tests
+      RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin
+  )
+  add_test(NAME effect_mac_demo COMMAND effect_mac_demo)
+  add_test(NAME effect_mac_demo_metal COMMAND effect_mac_demo --backend metal)
+  add_test(NAME effect_mac_demo_opengl COMMAND effect_mac_demo --backend opengl)
+  set_tests_properties(effect_mac_demo effect_mac_demo_metal effect_mac_demo_opengl PROPERTIES
+      SKIP_RETURN_CODE 77
+      TIMEOUT 120
+  )
+  target_compile_options(effect_mac_demo PRIVATE -Wall -Wextra -Wno-unused-parameter)
+endif ()
+
+# ==================================================================================================
 # Windows: the swap-chain window
 # ==================================================================================================
 if (WIN32 AND TARGET effect_win)

@@ -65,25 +65,39 @@ out/examples/bin/mac_demo                          # windowed; Esc/Q or close th
 out/examples/bin/mac_demo --frames 120 --immediate
 out/examples/bin/mac_demo --frames 1 --snapshot out/mac_demo.png   # windowed, then read the frame back
 out/examples/bin/mac_demo --verify --backend opengl
+
+out/examples/bin/effect_mac_demo                     # Metal + OpenGL: colour bars, and the backends agree
+out/examples/bin/effect_mac_demo --backend metal     # pinned; falling back is a failure
+out/examples/bin/effect_mac_demo --backend opengl
 ```
 
 `graphics_demo` writes a PNG rather than opening a window, so it runs on a build machine, in a
 container, or in a session with no display. The windowed programs and the effect demos are where a
 display or a GPU is the subject.
 
-On macOS the demo project builds `mac_demo` from `graphics/mac/` and `effect_demo`/`effect_benchmark`
-from `effect/`. `mac_demo` is the Cocoa window: it owns an `NSOpenGLView` and its `NSOpenGLContext`,
-and hands the CGL context to `gpu::WindowSurface`, so the frame goes straight to the view's drawable.
-`--verify` renders the same scene through an offscreen `gpu::Surface`, which is what a machine without
-a display runs. `effect_demo` brings up an offscreen device through the same OpenGL backend and exits
-77 when it cannot, which is the same skip the other GPU checks use.
+On macOS the demo project builds `mac_demo` from `graphics/mac/` and `effect_demo`,
+`effect_benchmark` and `effect_mac_demo` from `effect/`. `mac_demo` is the Cocoa/OpenGL window: it owns
+an `NSOpenGLView` and its `NSOpenGLContext`, and hands the CGL context to `gpu::WindowSurface`, so the
+frame goes straight to the view's drawable. `--verify` renders the same scene through an offscreen
+`gpu::Surface`, which is what a machine without a display runs.
+
+The effect demos bring up an offscreen device through the RHI, which on macOS is **Metal by default**
+with OpenGL as the fallback. `effect_demo` is the minimal client - one graph, one frame, the centre
+pixel printed - and exits 77 when there is no device. `effect_mac_demo` is the verification: it runs the
+same deterministic graph on every backend the machine can bring up, checks the eight colour bars of the
+test pattern at their centres, and compares the frames across backends, so "Metal renders, OpenGL
+renders, they disagree" fails with the pixel named rather than in a screenshot review. It prints the
+device line it actually got (`coral/backend/metal / Apple M6 / Metal 2.2+`), and a pinned `--backend`
+that falls back to another backend is a failure.
 
 There is no `graphics_demo` or `lottie_player` on macOS: those are the Win32 and X11/Wayland window
 implementations, and `mac_demo` is the Cocoa counterpart.
 
 An iOS cross build produces the same `effect_demo` and `effect_benchmark` as `.app` bundles, over the
-OpenGL ES 3.0 / EAGL backend. They are run through the simulator:
-`xcrun simctl spawn booted out/ios/bin/effect_demo.app/effect_demo`. iOS has no `examples/graphics`
+Metal backend (`CAMetalLayer` for presentation where a surface is used; these demos are offscreen). They
+are run through the simulator:
+`xcrun simctl spawn booted out/ios/bin/effect_demo.app/effect_demo`. The effect module's own suite
+(`test_effect.app`) is the stronger iOS check. iOS has no `examples/graphics`
 window demo; that directory now has Win32, X11/Wayland and Cocoa implementations.
 
 ## Verification
@@ -97,12 +111,14 @@ registered:
 | `vulkan_demo_checks`, `vulkan_demo_checks_render_pass` | the Vulkan backend draws and reads back the measured colours, through both the dynamic-rendering and render-pass paths |
 | `mac_demo_verify` | the CGL window path's scene renders and reads back through the offscreen device |
 | `effect_demo` | the effect graph runs end to end |
+| `effect_mac_demo`, `effect_mac_demo_metal`, `effect_mac_demo_opengl` | on macOS: the colour bars are right, and the backends produce the same frame (the per-backend rows pin one backend each) |
 | `effect_window_demo`, `effect_transition_demo` | the Windows swap-chain output and the preload/transition path |
 | `effect_x11_demo`, `effect_wayland_demo` | the Linux outputs |
 
 A check whose subject is unavailable returns **77**, which CTest reports as a skip: no Vulkan device,
-no X server, no compositor. On macOS the effect demo and the effect module's own suites run against
-the OpenGL backend; the Vulkan and windowed checks are not part of the macOS demo build. Run the
+no X server, no compositor. On macOS the effect demos and the effect module's own suites run against
+Metal by default, and `effect_mac_demo` additionally verifies OpenGL, so both backends a Mac can run
+are covered; the Vulkan and windowed checks are not part of the macOS demo build. Run the
 registered checks with
 
 ```sh

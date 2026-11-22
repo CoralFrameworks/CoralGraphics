@@ -77,7 +77,8 @@ ctest --test-dir build -R "test_(graphics|backend|geometry)|effect_(demo|public_
 ```
 
 `modules/graphics/backend/src/metal/` holds the implementation and
-`Metal后端实现进度与问题记录.md` records its status, its design decisions and what it does not do yet.
+`Metal后端实现进度与问题记录.md` records its status, its design decisions, its verified results on macOS
+and the iOS simulator, and what it does not do yet.
 
 The macOS `ctest` line names this repository's suites rather than running everything: a standalone
 tree also registers the vendored libjpeg-turbo command-line tests, whose executables the codec wrapper
@@ -91,6 +92,13 @@ iOS is a cross build from a macOS host with full Xcode (the Command Line Tools a
 Its default backend is Metal (`CAMetalLayer` for presentation, `MTLDevice` for everything else), and its
 OpenGL backend is OpenGL ES 3.0 through EAGL, not EGL, so that platform layer is `GlPlatformEagl.mm`; an
 offscreen device needs no window and the tests run in the simulator.
+
+**If `xcode-select -p` still reports the Command Line Tools**, `xcrun --sdk iphonesimulator` and
+`xcrun metal` fail even though Xcode is installed. Either select Xcode once
+(`sudo xcode-select -s /Applications/Xcode.app`) or prefix the commands below with
+`DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer`. The Metal backend compiles MSL at run time
+with `newLibraryWithSource:`, so the Metal toolchain's offline compiler is not a build prerequisite; the
+SDK headers are.
 
 ```sh
 # The build-time shader compiler is a host tool. Build it in the host tree first so the iOS build
@@ -179,15 +187,24 @@ ctest --test-dir out/examples --output-on-failure
 `graphics_demo` writes a PNG rather than opening a window, so it runs anywhere; the Vulkan verification,
 the windowed Lottie players and the effect demos skip (exit code 77) when the device or display they
 need is not there. On macOS the demo set is `mac_demo` (a Cocoa window over CGL/OpenGL 4.1, presenting
-through `gpu::WindowSurface`) plus the effect demos (`effect_demo`, `effect_benchmark`). The macOS
-`examples/graphics` window is interactive; `--verify` is the offscreen path for a build machine:
+through `gpu::WindowSurface`) plus the effect demos (`effect_demo`, `effect_benchmark` and the macOS
+verification `effect_mac_demo`). The macOS `examples/graphics` window is interactive; `--verify` is the
+offscreen path for a build machine:
 
 ```sh
 out/examples/bin/mac_demo                          # windowed, runs until closed or Esc/Q
 out/examples/bin/mac_demo --frames 120 --immediate
 out/examples/bin/mac_demo --frames 1 --snapshot out/mac_demo.png   # windowed, then read the frame back
 out/examples/bin/mac_demo --verify --backend opengl
+
+out/examples/bin/effect_mac_demo                   # Metal + OpenGL offscreen: colour bars and cross-backend match
+out/examples/bin/effect_mac_demo --backend metal   # pinned; a fallback to another backend is a failure
 ```
+
+`effect_mac_demo` renders the deterministic colour-bar graph through the effect engine on every backend the
+machine can bring up, checks the bars at their centres and compares the backends' frames, so a backend that
+draws a wrong or blank picture fails with the pixel named. It is registered with CTest together with a pinned
+row per backend.
 
 There is no macOS `graphics_demo`/`lottie_player`: those two are the Win32 and X11/Wayland window
 implementations, while `mac_demo` is the Cocoa counterpart.

@@ -467,9 +467,10 @@ void MetalDevice::buildCapabilities(const DeviceConfiguration& configuration) {
   mCapabilities.acceptsGlslDirect = false;
   mCapabilities.runtimeShaderCompilation = isGlslCompilerAvailable();
   mCapabilities.supportsDebugMarkers = true;
-  // CAMetalLayer grants Mailbox by disabling display sync and allowing a three-deep drawable pool, which is exactly the
-  // "newest frame replaces the queued one" semantic the RHI means by the name.
-  mCapabilities.mailboxPresent = true;
+  // Mailbox is granted by disabling display sync and allowing a three-deep drawable pool. `displaySyncEnabled` does not
+  // exist on iOS, where presentation is always in step with the display, so there the capability is false and a request
+  // is reported as the Fifo it actually got.
+  mCapabilities.mailboxPresent = !mIos;
 
   if (!mCapabilities.queryTextureFormat(PixelFormat::R8G8B8A8_UNORM).sampled ||
       !mCapabilities.queryTextureFormat(PixelFormat::R8G8B8A8_UNORM).renderable) {

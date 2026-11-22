@@ -8,7 +8,7 @@
 
 ## 1. 结论与完成度
 
-Metal 已经成为一个**可创建、可绘制、可读回、可作为 macOS 默认后端**的完整 RHI 后端，而不是占位实现：
+Metal 已经成为一个**可创建、可绘制、可读回、可作为 macOS / iOS 默认后端**的完整 RHI 后端，而不是占位实现：
 
 | 项目 | 状态 |
 | --- | --- |
@@ -22,9 +22,9 @@ Metal 已经成为一个**可创建、可绘制、可读回、可作为 macOS �
 | Fence / Semaphore（`MTLSharedEvent`） | ✅ 完成 |
 | 时间戳查询 / 遮挡查询 | ✅ 时间戳；遮挡已编码但未被测试覆盖 |
 | 原生纹理导入 | ⛔ 明确返回 `Unsupported`（RHI 缺少 IOSurface 类型，见 §9） |
-| iOS | ✅ 源码与 CMake 就绪；⛔ 本机无 iOS SDK，未做真机/模拟器验证 |
+| iOS | ✅ 已在 iPhone 18 Pro（iOS 27.2）模拟器上构建并跑通全部测试；⛔ 真机（签名/设备）尚未验证 |
 
-验证结果（macOS 27.0 / Apple M6 / Command Line Tools，Release）：
+验证结果（macOS 27.0 / Apple M6 / Xcode 27.2，Release）：
 
 ```text
 test_backend   : 103 tests, 97 passed, 6 skipped
@@ -32,15 +32,44 @@ test_graphics  : 1115 tests, 1096 passed, 19 skipped
 test_geometry  : 183 passed
 test_effect    : 111 tests, 110 passed, 1 skipped
 ctest (graphics|backend|geometry|effect|fuzz smoke): 6/6 Passed
+effect_mac_demo / _metal / _opengl (examples/effect): 4/4 Passed
 ```
 
-`test_graphics` 与 `test_effect` 的 GPU 用例默认就走 **Metal**（`getDefaultBackend()` 在 Apple 平台首选 Metal），也就是说画布、字图、图像滤镜、效果图等上层用例已经在 Metal 上跑通。19 个 skip 的原因均为环境属性而非 Metal 回归：
+iOS 模拟器（iPhone 18 Pro, iOS 27.2，`iphonesimulator27.2` SDK，arm64）结果：
+
+```text
+test_backend.app  : 25 tests, 19 passed, 6 skipped   （Metal device: "Apple iOS simulator GPU"）
+test_graphics.app : 1115 tests, 1088 passed, 27 skipped, 0 failed
+test_geometry.app : 183 passed
+test_effect.app   : 111 tests, 110 passed, 1 skipped
+```
+
+iOS 的 27 个 skip 中，`WindowSurface.*`（无窗口）、`Facade.DirectGlsl*` / `ContextGroup.*`（GL 专属）、
+字形用例（模拟器环境里测试的字体枚举为空）、`GpuSurface.TheWholeSvgCorpusInTheDemoGridMatchesTheRasterizer`
+（README 已记录模拟器软件渲染不保证逐像素一致）和 `Facade.CompilesGlslAndKeepsBothForms`
+（编译期平台是 ES，用例按桌面方言跳过）都是环境/平台属性；没有失败。
+
+`test_graphics` 与 `test_effect` 的 GPU 用例默认就走 **Metal**（`getDefaultBackend()` 在 Apple 平台首选 Metal），也就是说画布、字图、图像滤镜、效果图等上层用例已经在 Metal 上跑通。macOS 上 19 个 skip 的原因均为环境属性而非 Metal 回归：
 
 - `WindowSurface.*`：本机为无窗口的 CLI 环境，没有可用的窗口/图层；
 - `Facade.DirectGlsl*`、`ContextGroup.*`：GL 专属能力（Metal 不提供 `GLSLDirect`，`capabilities.acceptsGlslDirect == false` 时用例自行跳过）；
 - 少量字形用例：`no system font is available in this environment`。
 
 `test_backend` 的 6 个 skip 与改动前一致（Vulkan 在 macOS 上无 loader，相关用例按设计整体 skip）。
+
+> **关于本机工具链**：Xcode 27.2 已安装在 `/Applications/Xcode.app`，iOS SDK 与 Metal 工具链都在，但
+> `xcode-select -p` 仍指向 `/Library/Developer/CommandLineTools`，因此 `xcrun --sdk iphonesimulator` 和
+> `xcrun metal` 会报 “cannot be located / unable to find utility”。两种解决方式任选：
+>
+> ```sh
+> sudo xcode-select -s /Applications/Xcode.app     # 全局切换（需要管理员权限）
+> # 或者只对当前命令生效：
+> DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer xcrun --sdk iphonesimulator --show-sdk-path
+> ```
+>
+> 本记录的 iOS 构建/测试都使用 `DEVELOPER_DIR=...` 前缀，没有改动机器的全局设置。另外，本后端在运行时用
+> `newLibraryWithSource:` 编译 MSL，并不调用 `xcrun metal` 离线编译，所以 Metal Toolchain 不是运行前提；
+> 真正需要的是 Xcode 的 SDK 头文件（`Metal.framework`）。
 
 ---
 
@@ -243,28 +272,96 @@ Metal 的 clear 是渲染通道的 load action，只能清整个 attachment。`c
 
 从错误的目录运行时，字形/资源类用例会因为找不到资源而 skip（例如 `no system font is available in this environment`）。用 CTest（工作目录已设置）或从 `modules/graphics` 目录运行即可；CTest 结果是 6/6 通过。
 
+### 7.14 iOS 首次交叉编译：`displaySyncEnabled` 在 iOS 上不存在
+
+**现象**：iOS 构建在 `MetalPresentation.mm` 失败：
+`error: 'displaySyncEnabled' is unavailable: not available on iOS`。
+**根因**：`CAMetalLayer.displaySyncEnabled` 是 macOS 专属属性；iOS 的图层始终随显示器刷新呈现，没有逐图层的同步开关。
+**修复**：
+- 该属性放进 `#if !TARGET_OS_IPHONE`；
+- `createSwapchain` 在 iOS 上把 `Immediate`/`Mailbox` 请求**如实降级为 `Fifo`**（`SwapchainInfo::presentMode` 报告实际授予的模式）；
+- `Capabilities::mailboxPresent` 在 iOS 上为 `false`（macOS 仍为 `true`）。
+
+这条修复让 iOS 构建一次通过，也说明“能力表说支持”与“平台真的能授予”必须由同一个平台条件决定。
+
 ---
 
 ## 8. 验证记录
 
-构建（复用已有 Release 构建目录，重新配置后增量编译）：
+### 8.1 macOS
 
 ```sh
 /opt/homebrew/bin/cmake -S . -B build-mac -G "Unix Makefiles" -DCMAKE_BUILD_TYPE=Release
 /opt/homebrew/bin/cmake --build build-mac -j8
-```
 
-测试：
-
-```sh
 ctest --test-dir build-mac \
       -R "test_(graphics|backend|geometry)|effect_(demo|public_header_boundary)|fuzz_parsers_smoke" \
       --output-on-failure
 # 100% tests passed out of 6
 
+# examples/effect 的 macOS 验证（新增）
+ctest --test-dir build-mac -R 'effect_(demo|mac_demo)' --output-on-failure
+# effect_demo, effect_mac_demo, effect_mac_demo_metal, effect_mac_demo_opengl: 4/4 Passed
+
 # 单独观察 Metal
 ./build-mac/modules/graphics/backend/test_backend --gtest_filter='PlatformRunner.*:MetalCross.*'
 CORAL_RHI_BACKEND=metal ./build-mac/modules/graphics/backend/test_backend
+```
+
+### 8.2 iOS 模拟器
+
+`xcode-select` 仍指向 CLT 时，所有命令前加 `DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer`
+（见 §1 的工具链说明），或先执行 `sudo xcode-select -s /Applications/Xcode.app`。
+
+```sh
+DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer \
+/opt/homebrew/bin/cmake -S . -B build-ios-metal -G "Unix Makefiles" \
+  -DCMAKE_SYSTEM_NAME=iOS -DCMAKE_SYSTEM_PROCESSOR=arm64 \
+  -DCMAKE_OSX_SYSROOT=iphonesimulator -DCMAKE_OSX_ARCHITECTURES=arm64 \
+  -DCMAKE_OSX_DEPLOYMENT_TARGET=17.0 -DCMAKE_BUILD_TYPE=Release \
+  -DCORAL_SHADERS_COMPILER="$PWD/build-mac/modules/graphics/tools/shader_compiler/shader_compiler"
+
+DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer \
+/opt/homebrew/bin/cmake --build build-ios-metal --target test_backend test_graphics test_effect test_geometry -j8
+
+# 模拟器：先 boot 一台（本机为 iPhone 18 Pro, iOS 27.2）
+DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer xcrun simctl boot "iPhone 18 Pro" || true
+
+cd modules/graphics/backend   # 从模块目录运行，等价于 CTest 的工作目录
+DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer xcrun simctl spawn booted \
+    "$PWD/../../../build-ios-metal/modules/graphics/backend/test_backend.app/test_backend"
+
+# graphics / effect / geometry 同理，路径分别为
+#   build-ios-metal/modules/graphics/test_graphics.app/test_graphics
+#   build-ios-metal/modules/effect/test_effect.app/test_effect
+#   build-ios-metal/modules/graphics/geometry/test_geometry.app/test_geometry
+```
+
+模拟器里 `test_backend` 报告的设备是 `Apple iOS simulator GPU`（`Metal 2.2+`，`coral/backend/metal`），
+`PlatformRunner.MultisampleResolveProducesTheDrawnColour`、`IndexedDraws...`、`PushConstants...` 在
+模拟器上同样通过，说明 MSL 翻译、参数表和 resolve 路径在 iOS 上是同一套代码在工作。
+
+### 8.3 examples/effect 的 macOS 验证
+
+`examples/effect/effect_mac_demo.cpp` 是新增的 macOS 验证程序（详见 §11.1）：
+
+```sh
+./build-mac/bin/effect_mac_demo                 # Metal + OpenGL 全部验证
+./build-mac/bin/effect_mac_demo --backend metal # 固定后端；回退到别的后端算失败
+./build-mac/bin/effect_mac_demo --backend opengl
+./build-mac/bin/effect_mac_demo --backend vulkan # 无 loader -> 77（CTest 记为 skip）
+```
+
+实际输出：
+
+```text
+Metal: coral/backend/metal / Apple M6 / Metal 2.2+
+Metal: colour bars ok (8 of 8)
+OpenGL: coral/backend/gl-desktop/CGL / Apple M6 / OpenGL 4.1 core
+OpenGL: colour bars ok (8 of 8)
+OpenGL: matches Metal
+Vulkan: unavailable (no device for Vulkan (result 7))
+verified: 2, unavailable: 1, failed: 0
 ```
 
 关键证据（Metal 专属）：
@@ -281,9 +378,10 @@ CORAL_RHI_BACKEND=metal ./build-mac/modules/graphics/backend/test_backend
 
 按建议优先级排列：
 
-1. **iOS 未实机验证。** 源码没有 macOS 专属调用（`MTLCreateSystemDefaultDevice`、`CAMetalLayer`、`MTLSharedEvent`、`MTLCounterSampleBuffer` 在 iOS 均可用），CMake 对 `IOS` 也已就绪；但本机只有 Command Line Tools，没有 iOS SDK，无法交叉编译与跑模拟器。下一台有完整 Xcode 的机器上应执行：
-   `cmake -DCMAKE_SYSTEM_NAME=iOS -DCMAKE_OSX_SYSROOT=iphonesimulator ...`，并用 `xcrun simctl spawn booted ...` 跑 `test_backend`。
-   需要注意 iOS 上 `MTLTextureType1D`、wireframe fill、`fillModeNonSolid` 的能力声明（代码已按 `mIos` 关闭 wireframe）。
+1. **iOS 真机未验证（模拟器已通过）。** iPhone 18 Pro / iOS 27.2 模拟器上四个测试套件全部通过；真机还差签名与设备运行
+   （`-DCMAKE_OSX_SYSROOT=iphoneos` + 应用的签名设置），以及真实 GPU 上 `MTLTextureType1D`、wireframe fill
+   （已在 `mIos` 上关闭 `fillModeNonSolid`）、`MTLCounterSampleBuffer` 采样点的差异。模拟器的 Metal 是软件/半虚拟化实现，
+   性能数字不代表真机。
 2. **原生纹理导入缺失。** RHI 的 `NativeTextureKind` 没有 Metal/IOSurface 类型；视频解码器的零拷贝需要新增一种 kind（`IOSurface` 或 `CVMetalTextureCache`），这是 RHI 变更而不是后端私事。当前 `importNativeTexture` 返回 `Unsupported` 且 `supportsNativeTextureImport` 全为 `false`。
 3. **HDR / Display-P3 呈现未实现。** `createSwapchain` 对非 `Srgb` 请求降级为 SDR 并告警；`setHdrMetadata` 走默认 `Unsupported`。实现路径是 `CAMetalLayer.wantsExtendedDynamicRangeContent` + `colorspace` + 上层 PQ 输出。
 4. **`MTLBinaryArchive` 管线缓存未接入。** `DeviceConfiguration::pipelineCachePath` 目前被忽略；可仿照 Vulkan 的 pipeline cache（加载/销毁时写回）。
@@ -314,6 +412,9 @@ CORAL_RHI_BACKEND=metal ./build-mac/modules/graphics/backend/test_backend
   modules/graphics/backend/src/metal/MetalCross.h
   modules/graphics/backend/src/metal/MetalCross.mm
   modules/graphics/backend/tests/test_MetalCross.cpp
+  examples/effect/EffectVerification.h
+  examples/effect/EffectVerification.cpp
+  examples/effect/effect_mac_demo.cpp
   Metal后端实现进度与问题记录.md   （本文件）
 
 修改
@@ -325,11 +426,28 @@ CORAL_RHI_BACKEND=metal ./build-mac/modules/graphics/backend/test_backend
   modules/graphics/backend/tests/test_PlatformRunner.cpp
                                                  Metal 排到首位、implemented=true、MSAA 用例覆盖 Metal
   README.md / modules/graphics/README.md         Metal 选项、默认后端、目录与说明
+  examples/effect/CMakeLists.txt                 新增 effect_mac_demo 与 3 条 CTest
+  examples/README.md                             macOS 验证命令、测试表、Metal 默认后端说明
 ```
 
 ---
 
 ## 11. 复现与调试小抄
+
+### 11.1 examples/effect 的 macOS 验证
+
+`effect_demo` 只回答“图跑起来了”：它打印一帧的中心像素，但不判断像素对不对，也不说明用的是哪个后端。
+新增的 `effect_mac_demo`（`examples/effect/effect_mac_demo.cpp` + `EffectVerification.{h,cpp}`）回答的是验证问题：
+
+- **同一张确定性图**：`TestPatternInputNode`（8 条 SMPTE 彩条）→ copy pass → `ReadbackOutputNode`；
+- **逐条检查**：在每条彩条中心取像素，核对预期的 RGB 与不透明度（容差 2），失败时打印条号、坐标和实际像素；
+- **跨后端比较**：Metal 是参照，OpenGL 的结果必须逐像素在容差内一致；不一致时打印第一个差异像素；
+- **固定后端**：`--backend metal|opengl|vulkan` 通过 `EffectEngineConfig::externalDevice` 先以
+  `allowFallback=false` 创建设备，因此“请求 Metal 却回退到 OpenGL”是失败而不是静默通过；后端不可用返回 77；
+- **注册方式**：`effect_mac_demo`（全部后端）、`effect_mac_demo_metal`、`effect_mac_demo_opengl` 三条 CTest，
+  失败时能直接看出是哪个后端。
+
+之所以用离屏读回而不是开窗：验证要能在构建机/CI 上跑，窗口只会让它变成需要人盯着的东西。窗口呈现路径的验证仍列在 §9 第 10 条。
 
 ```sh
 # 只用 Metal 跑后端套件

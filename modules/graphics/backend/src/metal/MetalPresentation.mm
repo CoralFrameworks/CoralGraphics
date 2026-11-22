@@ -16,6 +16,8 @@
 
 #include "private/backend/metal/MetalDevice.h"
 
+#include <TargetConditionals.h>
+
 #include <algorithm>
 #include <string>
 
@@ -117,6 +119,11 @@ Result MetalDevice::createSwapchain(const SwapchainDescriptor& descriptor, Swapc
 
   // The drawable's format is the layer's. See `kPresentFormat`.
   swapchain.format = kPresentFormat;
+  if (mIos && descriptor.presentMode != PresentMode::Fifo) {
+    // iOS has no swap-interval or display-sync control: the compositor presents the drawable at the display's refresh
+    // rate. Reporting the granted mode honestly is what lets a caller that wanted Immediate know it did not get it.
+    swapchain.presentMode = PresentMode::Fifo;
+  }
   swapchain.mtlFormat = toMtlPixelFormat(swapchain.format);
   swapchain.srgb = false;
   swapchain.presentMode = descriptor.presentMode;
@@ -131,7 +138,11 @@ Result MetalDevice::createSwapchain(const SwapchainDescriptor& descriptor, Swapc
   layer.framebufferOnly = NO;
   layer.drawableSize = CGSizeMake(swapchain.width, swapchain.height);
   layer.maximumDrawableCount = swapchain.imageCount;
+#if !TARGET_OS_IPHONE
+  // `displaySyncEnabled` is a macOS-only property. On iOS a CAMetalLayer presents in step with the display and offers
+  // no per-layer control, so the requested mode is granted as Fifo below rather than pretended.
   layer.displaySyncEnabled = descriptor.presentMode != PresentMode::Immediate;
+#endif
   layer.allowsNextDrawableTimeout = YES;
   layer.opaque = YES;
   if (descriptor.label != nullptr) layer.name = [NSString stringWithUTF8String:descriptor.label];
