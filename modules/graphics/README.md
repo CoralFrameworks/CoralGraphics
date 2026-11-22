@@ -357,10 +357,12 @@ cmake --build build/graphic -j8
 ./build/graphic/modules/graphics/geometry/test_geometry # the value types
 ```
 
-On macOS `test_backend` creates its offscreen device through CGL and reports `OpenGL 4.1 core`, the
-highest version Apple implements; the Vulkan cases skip because the system has no Vulkan loader. The
-device-free suites still run on a machine with no graphics stack, which is what keeps a CI job useful
-there: only the cases whose subject is a real context are skipped.
+On macOS `test_backend` iterates Metal and OpenGL: the offscreen Metal device reports
+`Apple M...` / `Metal 2.2+`, and the CGL context reports `OpenGL 4.1 core`, the highest version Apple
+implements. Vulkan is not compiled there at all (its option is forced off on Apple platforms), so the two
+Vulkan-specific cases skip with "this build has no Vulkan backend" rather than after a failed loader
+lookup. The device-free suites still run on a machine with no graphics stack, which is what keeps a CI
+job useful there: only the cases whose subject is a real context are skipped.
 
 A standalone configure uses this repository's bundled submodules for libz, libyuv and libgtest, so the
 only preparation is initializing them:
@@ -432,7 +434,7 @@ Two things about this are worth knowing, because both cost time:
 | Option | Default | Effect |
 |---|---|---|
 | `CORAL_BACKEND_SUPPORTS_OPENGL` | `ON` | Build the OpenGL backend (the reference implementation). |
-| `CORAL_BACKEND_SUPPORTS_VULKAN` | `ON` | Build the Vulkan backend (dynamic rendering on 1.3+, render-pass/framebuffer fallback on 1.0/1.1; needs `third_party/vkheaders` and `third_party/vkmemalloc`). |
+| `CORAL_BACKEND_SUPPORTS_VULKAN` | `ON` elsewhere, forced `OFF` on Apple | Build the Vulkan backend (dynamic rendering on 1.3+, render-pass/framebuffer fallback on 1.0/1.1; needs `third_party/vkheaders` and `third_party/vkmemalloc`). Apple platforms do not offer it: Metal is their backend and there is no Vulkan loader. |
 | `CORAL_BACKEND_SUPPORTS_METAL` | `ON` on Apple, `OFF` elsewhere | Build the Metal backend. It is the default backend on macOS and iOS, needs SPIRV-Cross's MSL backend and shaderc, and is forced off on a non-Apple configure rather than failing there. |
 | `CORAL_BACKEND_SUPPORTS_SPIRV_CROSS` | `ON` | Build SPIRV-Cross so shaders can be supplied as SPIR-V. When off, the canvas uses its committed GLSL fallback. |
 | `CORAL_BACKEND_SUPPORTS_SHADERC` | `ON` | Build shaderc so GLSL source can be compiled to SPIR-V. |

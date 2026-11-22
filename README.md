@@ -61,10 +61,11 @@ On macOS the prerequisites are the Xcode Command Line Tools (`xcode-select --ins
 provides the Python 3 the shader-embedding step uses) and CMake 3.19 or newer (Homebrew's `cmake`, or
 the CMake.app bundle). **Metal is the default backend**: `CORAL_BACKEND_SUPPORTS_METAL` is on for an
 Apple configure, SPIR-V shaders are translated to MSL with SPIRV-Cross, and the OpenGL backend remains
-compiled in as the fallback. Vulkan is compiled in but the system has no Vulkan loader, so the Vulkan
-cases skip themselves rather than fail. `test_backend` prints the negotiated device for every backend
-it can create (`Apple M...` / `Metal 2.2+` / `coral/backend/metal`, and `OpenGL 4.1 core` / `CGL`) which
-is the quickest way to confirm both are real:
+compiled in as the fallback. **Vulkan is not offered on Apple platforms**: the option is forced off
+there, because macOS and iOS have Metal as their native backend and no Vulkan loader, so a Vulkan
+build could only report `Unsupported` after a failed loader lookup. `test_backend` prints the
+negotiated device for every backend it can create (`Apple M...` / `Metal 2.2+` / `coral/backend/metal`,
+and `OpenGL 4.1 core` / `CGL`) which is the quickest way to confirm both are real:
 
 ```sh
 # The Metal backend on its own, the way a regression run pins it

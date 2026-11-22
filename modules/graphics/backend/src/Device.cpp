@@ -89,8 +89,9 @@ const BackendAvailability* findBackend(Backend backend) {
  *  - **Windows**: Vulkan, then OpenGL 4.1+. Those two between them cover every device the engine can
  *    run on, which is why Direct3D is deliberately absent rather than merely unwritten.
  *  - **Linux**: Vulkan, then OpenGL 4.1+.
- *  - **macOS**: Metal, then Vulkan (via MoltenVK), then OpenGL 4.1+. OpenGL is last because Apple
- *    deprecated it, but it is still the only always-present option on older systems.
+ *  - **macOS**: Metal, then OpenGL 4.1+. OpenGL is last because Apple deprecated it, but it is still
+ *    present on older systems. Vulkan is deliberately absent: it is not built on Apple platforms (see
+ *    `CORAL_BACKEND_SUPPORTS_VULKAN` in the root CMakeLists), so naming it here could only ever fail.
  *  - **Android**: Vulkan, then OpenGL ES 3.0+.
  *  - **iOS**: Metal, then OpenGL ES 3.0+.
  *
@@ -132,7 +133,6 @@ const Backend* defaultPriority(uint32_t* outCount) {
     Backend::OpenGL,
 #elif defined(CORAL_BUILD_FOR_MAC)
     Backend::Metal,
-    Backend::Vulkan,
     Backend::OpenGL,
 #else
     // Linux and anything else unix-like.

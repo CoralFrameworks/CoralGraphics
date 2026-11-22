@@ -278,6 +278,15 @@ elseif (NOT CORAL_GRAPHICS_SHADER_COMPILER AND TARGET shader_compiler)
   set(CORAL_GRAPHICS_SHADER_COMPILER "$<TARGET_FILE:shader_compiler>")
 endif ()
 
+# The Vulkan-environment shader set is not the Vulkan backend's private property: Metal consumes the same set, because
+# the `DescriptorSet`/`Binding` decorations it carries are what a Metal pipeline's slot table is built from. Gating the
+# set on `CORAL_BACKEND_SUPPORTS_VULKAN` used to be right by accident -- the two generally came together -- but a
+# Metal-only Apple build has Metal on and Vulkan off, and it must still embed this set.
+set(CORAL_GRAPHICS_NEEDS_VULKAN_SHADER_SET OFF)
+if (CORAL_BACKEND_SUPPORTS_VULKAN OR CORAL_BACKEND_SUPPORTS_METAL)
+  set(CORAL_GRAPHICS_NEEDS_VULKAN_SHADER_SET ON)
+endif ()
+
 set(CORAL_GRAPHICS_EMBEDDED_SHADERS "")
 set(CORAL_GRAPHICS_EMBEDDED_VULKAN_SHADERS "")
 if (CORAL_GRAPHICS_SHADER_COMPILER AND EXISTS "${CORAL_GRAPHICS_SHADER_SRC}")
@@ -308,7 +317,7 @@ if (CORAL_GRAPHICS_SHADER_COMPILER AND EXISTS "${CORAL_GRAPHICS_SHADER_SRC}")
     # built from that module would see every resource at (0, 0). Compiling again with
     # `--environment vulkan` is what produces the decorations, and embedding both sets is what lets one
     # binary draw on either backend.
-    if (CORAL_BACKEND_SUPPORTS_VULKAN)
+    if (CORAL_GRAPHICS_NEEDS_VULKAN_SHADER_SET)
       set(vulkanSpirv "${CORAL_GRAPHICS_VULKAN_SHADER_OUT}/${shaderName}.spv")
       add_custom_command(
           OUTPUT "${vulkanSpirv}"
@@ -336,8 +345,13 @@ if (CORAL_GRAPHICS_SHADER_COMPILER AND EXISTS "${CORAL_GRAPHICS_SHADER_SRC}")
           "${CORAL_PWSH_EXECUTABLE}" -NoProfile -ExecutionPolicy Bypass
           -File "${CMAKE_CURRENT_LIST_DIR}/tools/embed_shaders.ps1"
           -SourceDir "${CORAL_GRAPHICS_SHADER_OUT}"
-          -ShaderSourceDir "${CORAL_GRAPHICS_SHADER_SRC}"
-          -VulkanSourceDir "${CORAL_GRAPHICS_VULKAN_SHADER_OUT}"
+          -ShaderSourceDir "${CORAL_GRAPHICS_SHADER_SRC}")
+      # The script rejects a directory it was told about but that does not exist, which is what makes a build that
+      # asked for the set and embedded nothing a failure. So it is only named when the set was compiled.
+      if (CORAL_GRAPHICS_NEEDS_VULKAN_SHADER_SET)
+        list(APPEND CORAL_SHADER_EMBED_COMMAND -VulkanSourceDir "${CORAL_GRAPHICS_VULKAN_SHADER_OUT}")
+      endif ()
+      list(APPEND CORAL_SHADER_EMBED_COMMAND
           -CommittedFile "${CMAKE_CURRENT_LIST_DIR}/src/gpu/CanvasShadersEmbedded.h"
           -Output "${CORAL_GRAPHICS_SHADER_HEADER}")
       set(CORAL_SHADER_EMBED_SCRIPT "${CMAKE_CURRENT_LIST_DIR}/tools/embed_shaders.ps1")
@@ -349,7 +363,7 @@ if (CORAL_GRAPHICS_SHADER_COMPILER AND EXISTS "${CORAL_GRAPHICS_SHADER_SRC}")
           --shader-source-dir "${CORAL_GRAPHICS_SHADER_SRC}"
           --committed-file "${CMAKE_CURRENT_LIST_DIR}/src/gpu/CanvasShadersEmbedded.h"
           --output "${CORAL_GRAPHICS_SHADER_HEADER}")
-      if (CORAL_BACKEND_SUPPORTS_VULKAN)
+      if (CORAL_GRAPHICS_NEEDS_VULKAN_SHADER_SET)
         list(APPEND CORAL_SHADER_EMBED_COMMAND
             --vulkan-source-dir "${CORAL_GRAPHICS_VULKAN_SHADER_OUT}")
       endif ()

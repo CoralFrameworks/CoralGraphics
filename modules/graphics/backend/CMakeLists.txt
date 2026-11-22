@@ -36,6 +36,18 @@ if (NOT DEFINED CORAL_BACKEND_SUPPORTS_OPENGL)
   option(CORAL_BACKEND_SUPPORTS_OPENGL "Build the OpenGL backend for the RHI" ON)
 endif ()
 
+# Vulkan is not offered on Apple platforms: macOS and iOS have Metal and no Vulkan loader, so a Vulkan build there
+# could only ever report `Unsupported` after paying for a loader lookup. Forced off rather than merely defaulted off, so
+# a cached `-DCORAL_BACKEND_SUPPORTS_VULKAN=ON` in an existing macOS build tree (CLion's, for instance) is corrected on
+# the next configure instead of bringing the dead backend back.
+if (APPLE)
+  if (CORAL_BACKEND_SUPPORTS_VULKAN)
+    message(STATUS "The RHI's Vulkan backend is not offered on Apple platforms; Metal is the Apple backend")
+  endif ()
+  set(CORAL_BACKEND_SUPPORTS_VULKAN OFF CACHE BOOL
+      "Build the Vulkan backend for the RHI (not offered on Apple platforms)" FORCE)
+endif ()
+
 if (NOT DEFINED CORAL_BACKEND_SUPPORTS_VULKAN)
   option(CORAL_BACKEND_SUPPORTS_VULKAN "Build the Vulkan backend for the RHI" OFF)
 endif ()

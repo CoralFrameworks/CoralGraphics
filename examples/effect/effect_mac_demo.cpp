@@ -32,16 +32,19 @@
  *  - it compares the backends' frames against each other, so "Metal renders, OpenGL renders, they disagree" is caught
  *    here rather than in a screenshot review.
  *
- * It is the macOS counterpart of `vulkan_demo --verify` and `linux_demo --verify`, and it is registered with CTest both
- * as a whole-machine check and as one row per backend.
+ * It is the macOS counterpart of the other platforms' offscreen `--verify` modes, and it is registered with CTest both as
+ * a whole-machine check and as one row per backend.
  *
  * ## Usage
  *
  * ```sh
- * effect_mac_demo                    # every backend this build and machine can run
+ * effect_mac_demo                    # Metal and OpenGL, both verified
  * effect_mac_demo --backend metal    # pinned; falling back to another backend is a failure
  * effect_mac_demo --backend opengl
  * ```
+ *
+ * Vulkan is not an option on macOS: the backend is not compiled there (see the root CMakeLists), so the program does
+ * not attempt it and does not report it as unavailable.
  *
  * Exit codes: 0 = every check passed, 1 = a check failed, 77 = no backend could be brought up (which CTest reports as
  * a skip).
@@ -156,8 +159,8 @@ Outcome verifyBackend(const coral::EffectBackend requested, effect_verification:
 }
 
 void printUsage() {
-  std::printf("usage: effect_mac_demo [--backend auto|metal|opengl|vulkan]\n"
-              "       without --backend, every backend this build and machine can run is verified\n");
+  std::printf("usage: effect_mac_demo [--backend auto|metal|opengl]\n"
+              "       without --backend, Metal and OpenGL are both verified\n");
 }
 
 } // namespace anonymous
@@ -176,6 +179,13 @@ int main(int argc, char** argv) {
       if (index + 1 >= argc) {
         std::fprintf(stderr, "%s needs a value\n", argument);
         printUsage();
+        return 1;
+      }
+      if (std::strcmp(argv[index + 1], "vulkan") == 0 || std::strcmp(argv[index + 1], "vk") == 0) {
+        // Named rather than "unknown": a caller asking for Vulkan on macOS is asking for a backend this platform does
+        // not build, and the answer should say so instead of suggesting a typo.
+        std::fprintf(stderr,
+                "the Vulkan backend is not offered on Apple platforms; use --backend metal or --backend opengl\n");
         return 1;
       }
       bool recognised = false;
@@ -203,10 +213,10 @@ int main(int argc, char** argv) {
   std::printf("effect mac verification\n");
   std::vector<coral::EffectBackend> backends;
   if (allBackends) {
-    // Platform preference order. A compiled-in backend is attempted; one this machine cannot bring up is reported as
-    // unavailable and does not fail the run, which is what makes the check usable on a CI machine with no Vulkan loader.
-    for (const coral::EffectBackend candidate:
-            { coral::EffectBackend::Metal, coral::EffectBackend::OpenGL, coral::EffectBackend::Vulkan }) {
+    // Platform preference order. Both Apple backends are compiled in on macOS; a backend whose device cannot be
+    // created is reported as unavailable rather than failing the run, which is what keeps the check usable on a machine
+    // with no GPU. Vulkan is not in the list because it is not built on Apple platforms.
+    for (const coral::EffectBackend candidate: { coral::EffectBackend::Metal, coral::EffectBackend::OpenGL }) {
       if (backend::isBackendAvailable(rhiBackend(candidate))) backends.push_back(candidate);
     }
     if (backends.empty()) {

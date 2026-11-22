@@ -22,40 +22,43 @@ Metal 已经成为一个**可创建、可绘制、可读回、可作为 macOS / 
 | Fence / Semaphore（`MTLSharedEvent`） | ✅ 完成 |
 | 时间戳查询 / 遮挡查询 | ✅ 时间戳；遮挡已编码但未被测试覆盖 |
 | 原生纹理导入 | ⛔ 明确返回 `Unsupported`（RHI 缺少 IOSurface 类型，见 §9） |
-| iOS | ✅ 已在 iPhone 18 Pro（iOS 27.2）模拟器上构建并跑通全部测试；⛔ 真机（签名/设备）尚未验证 |
+| iOS | ✅ 已在 iPhone 18 Pro（iOS 27.2）模拟器上构建并跑通四个测试套件；⛔ 真机（签名/设备）尚未验证 |
 
-验证结果（macOS 27.0 / Apple M6 / Xcode 27.2，Release）：
+验证结果（macOS 27.0 / Apple M6 / Xcode 27.2，Release；Vulkan 已在 Apple 平台关闭）：
 
 ```text
-test_backend   : 103 tests, 97 passed, 6 skipped
-test_graphics  : 1115 tests, 1096 passed, 19 skipped
+test_backend   : 103 tests, 100 passed, 3 skipped
+test_graphics  : 1115 tests, 1095 passed, 20 skipped
 test_geometry  : 183 passed
 test_effect    : 111 tests, 110 passed, 1 skipped
-ctest (graphics|backend|geometry|effect|fuzz smoke): 6/6 Passed
+ctest (graphics|backend|geometry|effect|fuzz smoke + effect mac rows): 9/9 Passed
 effect_mac_demo / _metal / _opengl (examples/effect): 4/4 Passed
 ```
 
-iOS 模拟器（iPhone 18 Pro, iOS 27.2，`iphonesimulator27.2` SDK，arm64）结果：
+iOS 模拟器（iPhone 18 Pro, iOS 27.2，`iphonesimulator27.2` SDK，arm64；Vulkan 关闭）结果：
 
 ```text
-test_backend.app  : 25 tests, 19 passed, 6 skipped   （Metal device: "Apple iOS simulator GPU"）
-test_graphics.app : 1115 tests, 1088 passed, 27 skipped, 0 failed
+test_backend.app  : 103 tests, 100 passed, 3 skipped   （Metal device: "Apple iOS simulator GPU"）
+test_graphics.app : 1115 tests, 1087 passed, 28 skipped, 0 failed
 test_geometry.app : 183 passed
 test_effect.app   : 111 tests, 110 passed, 1 skipped
 ```
 
-iOS 的 27 个 skip 中，`WindowSurface.*`（无窗口）、`Facade.DirectGlsl*` / `ContextGroup.*`（GL 专属）、
+iOS 的 28 个 skip 中，`WindowSurface.*`（无窗口）、`Facade.DirectGlsl*` / `ContextGroup.*`（GL 专属）、
 字形用例（模拟器环境里测试的字体枚举为空）、`GpuSurface.TheWholeSvgCorpusInTheDemoGridMatchesTheRasterizer`
-（README 已记录模拟器软件渲染不保证逐像素一致）和 `Facade.CompilesGlslAndKeepsBothForms`
-（编译期平台是 ES，用例按桌面方言跳过）都是环境/平台属性；没有失败。
+（README 已记录模拟器软件渲染不保证逐像素一致）、`Facade.CompilesGlslAndKeepsBothForms`
+（编译期平台是 ES，用例按桌面方言跳过）和 `GpuSurface.MultipleFramesInFlightKeepEveryFrameIsolated`
+（用例自身要求 Vulkan 后端）都是环境/平台属性；没有失败。
 
-`test_graphics` 与 `test_effect` 的 GPU 用例默认就走 **Metal**（`getDefaultBackend()` 在 Apple 平台首选 Metal），也就是说画布、字图、图像滤镜、效果图等上层用例已经在 Metal 上跑通。macOS 上 19 个 skip 的原因均为环境属性而非 Metal 回归：
+`test_graphics` 与 `test_effect` 的 GPU 用例默认就走 **Metal**（`getDefaultBackend()` 在 Apple 平台首选 Metal），也就是说画布、字图、图像滤镜、效果图等上层用例已经在 Metal 上跑通。macOS 上 20 个 skip 的原因均为环境属性而非 Metal 回归：
 
 - `WindowSurface.*`：本机为无窗口的 CLI 环境，没有可用的窗口/图层；
 - `Facade.DirectGlsl*`、`ContextGroup.*`：GL 专属能力（Metal 不提供 `GLSLDirect`，`capabilities.acceptsGlslDirect == false` 时用例自行跳过）；
 - 少量字形用例：`no system font is available in this environment`。
 
-`test_backend` 的 6 个 skip 与改动前一致（Vulkan 在 macOS 上无 loader，相关用例按设计整体 skip）。
+`test_backend` 的 3 个 skip 是：两个 Vulkan 专属用例（本构建没有 Vulkan 后端）与一个
+`DirectGlslDrawsWithTheCallersLocationTable`（Metal 迭代先因 `acceptsGlslDirect == false` 跳过整个用例，
+属于测试框架逐后端迭代的既有局限，不是 Metal 回归）。
 
 > **关于本机工具链**：Xcode 27.2 已安装在 `/Applications/Xcode.app`，iOS SDK 与 Metal 工具链都在，但
 > `xcode-select -p` 仍指向 `/Library/Developer/CommandLineTools`，因此 `xcrun --sdk iphonesimulator` 和
@@ -238,7 +241,8 @@ SPIR-V ────────────────────────�
 
 ### 7.7 三角形扇（TriangleFan）没有 Metal 图元
 
-`PrimitiveTopology::TriangleFan` 在 Metal 中不存在。后端按 Vulkan 的做法生成一张 `(0, i-1, i)` 的 UINT16 索引缓冲（最多 65535 个顶点），绘制时改用 `drawIndexedPrimitives:` 并以 `baseVertex = firstVertex` 表达起始顶点。索引缓冲由设备持有（`ensureFanIndexBuffer`），首次使用时创建。
+`PrimitiveTopology::TriangleFan` 在 Metal 中不存在。后端按 Vulkan 的做法生成一张 `(0, i-1, i)` 的 UINT16 索引缓冲（最多 65535 个顶点），绘制时改用 `drawIndexedPrimitives:` 并以 `baseVertex = firstVertex` 表达起始顶点。索引缓冲由设备持有（`ensureFanIndexBuffer`），在设备初始化时创建 —— 而不是首次绘制时，因为命令缓冲可以在任意线程录制，
+惰性创建会把一次设备状态写入放到录制路径上。
 
 ### 7.8 呈现路径：CAMetalLayer 与“提交后再 present”
 
@@ -266,7 +270,9 @@ Metal 的 clear 是渲染通道的 load action，只能清整个 attachment。`c
 
 ### 7.12 测试框架的顺序问题（不是产品缺陷，但影响验证）
 
-`test_PlatformRunner.cpp` 的 `forEachExpectedBackend` 在某个后端创建失败时调用 `GTEST_SKIP()`，该宏结束**整个用例**。原先列表顺序是 OpenGL → Vulkan → Metal，而 macOS 上 Vulkan 编译进来却没有 loader，于是 Metal 永远轮不到执行。修复：把 Metal 放到列表首位（它也是 Apple 平台的首选后端），并把 `implemented` 设为 `true`，让 Metal 创建失败成为真正的失败而不是跳过。
+`test_PlatformRunner.cpp` 的 `forEachExpectedBackend` 在某个后端不可用时调用 `GTEST_SKIP()`，该宏结束**整个用例**。原先列表顺序是 OpenGL → Vulkan → Metal，而 macOS 上 Vulkan 编译进来却没有 loader，于是 Metal 永远轮不到执行。修复：把 Metal 放到列表首位（它也是 Apple 平台的首选后端），并把 `implemented` 设为 `true`，让 Metal 创建失败成为真正的失败而不是跳过。
+
+这个局限现在还剩一个可见后果：Metal 因 `acceptsGlslDirect == false` 跳过 `DirectGlslDrawsWithTheCallersLocationTable` 时，OpenGL 那一轮不会被跑到。这是 gtest 没有“只跳过当前迭代”的表达能力造成的，记录下来而不是为了让数字好看去改测试语义。
 
 ### 7.13 环境带来的 skip 不是回归
 
@@ -284,6 +290,25 @@ Metal 的 clear 是渲染通道的 load action，只能清整个 attachment。`c
 
 这条修复让 iOS 构建一次通过，也说明“能力表说支持”与“平台真的能授予”必须由同一个平台条件决定。
 
+### 7.15 macOS / iOS 不再构建 Vulkan 后端
+
+**背景**：Apple 平台的 Vulkan 需要 MoltenVK 之类的额外 loader，而本树在 macOS 上编译 Vulkan 后端的结果只是每次创建设备时打印
+`no Vulkan loader could be opened`，然后回退到 Metal/OpenGL。`effect_mac_demo` 也会把 Vulkan 列为 “unavailable”，
+在验证输出里制造一条看起来像错误的日志。
+
+**处理**：
+- `CORAL_BACKEND_SUPPORTS_VULKAN` 在 `APPLE` 上被 **FORCE 成 OFF**（root `CMakeLists.txt`、`cmake/CoralGraphicsDependencies.cmake`、
+  `modules/graphics/backend/CMakeLists.txt` 三处都处理），因此 CLion 等已有构建目录里的缓存 `=ON` 会在下次重新配置时被纠正；
+- 默认后端优先级在 macOS 上改为 Metal → OpenGL（iOS 本来就是 Metal → OpenGL ES）；
+- `effect_mac_demo` 只验证 Metal 与 OpenGL，`--backend vulkan` 会明确提示“Apple 平台不提供 Vulkan”；
+- Windows / Linux / Android 的 Vulkan 默认值不受影响。
+
+**一个不能顺手改错的依赖**：Metal 消费的是 **Vulkan 环境编译出来的画布 shader 集**（它带 `DescriptorSet/Binding` 装饰，
+Metal 的槽位表就是从这些装饰映射出来的）。原先 `modules/graphics/CMakeLists.txt` 用 `CORAL_BACKEND_SUPPORTS_VULKAN`
+控制是否生成/嵌入这套 shader；在“Metal ON、Vulkan OFF”的 Apple 构建里，这会把 Metal 需要的 shader 集一起关掉。
+现在改为独立的 `CORAL_GRAPHICS_NEEDS_VULKAN_SHADER_SET = VULKAN OR METAL`，并且只在真正生成该集合时才把目录传给
+嵌入脚本（脚本对“传了目录却不存在”是报错而不是静默跳过）。
+
 ---
 
 ## 8. 验证记录
@@ -297,7 +322,7 @@ Metal 的 clear 是渲染通道的 load action，只能清整个 attachment。`c
 ctest --test-dir build-mac \
       -R "test_(graphics|backend|geometry)|effect_(demo|public_header_boundary)|fuzz_parsers_smoke" \
       --output-on-failure
-# 100% tests passed out of 6
+# 100% tests passed out of 6（effect 的 3 条 mac 行在下面的命令里）
 
 # examples/effect 的 macOS 验证（新增）
 ctest --test-dir build-mac -R 'effect_(demo|mac_demo)' --output-on-failure
@@ -349,7 +374,7 @@ DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer xcrun simctl spawn boot
 ./build-mac/bin/effect_mac_demo                 # Metal + OpenGL 全部验证
 ./build-mac/bin/effect_mac_demo --backend metal # 固定后端；回退到别的后端算失败
 ./build-mac/bin/effect_mac_demo --backend opengl
-./build-mac/bin/effect_mac_demo --backend vulkan # 无 loader -> 77（CTest 记为 skip）
+./build-mac/bin/effect_mac_demo --backend vulkan # Apple 平台不提供 Vulkan：明确报错，exit 1
 ```
 
 实际输出：
@@ -360,8 +385,8 @@ Metal: colour bars ok (8 of 8)
 OpenGL: coral/backend/gl-desktop/CGL / Apple M6 / OpenGL 4.1 core
 OpenGL: colour bars ok (8 of 8)
 OpenGL: matches Metal
-Vulkan: unavailable (no device for Vulkan (result 7))
-verified: 2, unavailable: 1, failed: 0
+
+verified: 2, unavailable: 0, failed: 0
 ```
 
 关键证据（Metal 专属）：
@@ -418,7 +443,10 @@ verified: 2, unavailable: 1, failed: 0
   Metal后端实现进度与问题记录.md   （本文件）
 
 修改
-  CMakeLists.txt                                 新增 CORAL_BACKEND_SUPPORTS_METAL
+  CMakeLists.txt                                 新增 CORAL_BACKEND_SUPPORTS_METAL；Apple 上强制关闭 Vulkan
+  cmake/CoralGraphicsDependencies.cmake          Apple 上强制关闭 Vulkan
+  modules/graphics/CMakeLists.txt                Metal 与 Vulkan 共用 Vulkan 环境 shader 集
+  modules/graphics/backend/src/Device.cpp        macOS 优先级去掉 Vulkan
   modules/graphics/backend/CMakeLists.txt        Metal 选项/源文件/frameworks/ARC/测试/配置规则
   third_party/SPIRV-Cross/coral/CMakeLists.txt   编译 spirv_msl.cpp
   modules/graphics/backend/src/Device.cpp        Backend::Metal 分支

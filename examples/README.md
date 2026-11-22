@@ -115,10 +115,10 @@ registered:
 | `effect_window_demo`, `effect_transition_demo` | the Windows swap-chain output and the preload/transition path |
 | `effect_x11_demo`, `effect_wayland_demo` | the Linux outputs |
 
-A check whose subject is unavailable returns **77**, which CTest reports as a skip: no Vulkan device,
-no X server, no compositor. On macOS the effect demos and the effect module's own suites run against
-Metal by default, and `effect_mac_demo` additionally verifies OpenGL, so both backends a Mac can run
-are covered; the Vulkan and windowed checks are not part of the macOS demo build. Run the
+A check whose subject is unavailable returns **77**, which CTest reports as a skip: no GPU, no X server,
+no compositor. On macOS the effect demos and the effect module's own suites run against Metal by
+default, and `effect_mac_demo` additionally verifies OpenGL, so both backends a Mac can run are covered.
+Vulkan is not part of the macOS demo build: the backend is not offered on Apple platforms. Run the
 registered checks with
 
 ```sh
