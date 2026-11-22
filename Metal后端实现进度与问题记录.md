@@ -18,7 +18,7 @@ Metal 已经成为一个**可创建、可绘制、可读回、可作为 macOS / 
 | 描述符集布局、描述符集、管线布局 | ✅ 完成 |
 | 图形管线、计算管线、深度/模板状态、混合、MSAA | ✅ 完成 |
 | 命令缓冲（渲染通道、绘制、间接绘制、计算、拷贝、清除、查询） | ✅ 完成 |
-| 交换链与呈现（`CAMetalLayer`、`defaultFramebufferView()`、`endFrame`） | ✅ 完成（窗口环境未在自动化测试中覆盖，见 §9） |
+| 交换链与呈现（`CAMetalLayer`、`defaultFramebufferView()`、`endFrame`） | ✅ 完成；`mac_demo` 的 Metal 窗口路径已实跑（见 §7.16） |
 | Fence / Semaphore（`MTLSharedEvent`） | ✅ 完成 |
 | 时间戳查询 / 遮挡查询 | ✅ 时间戳；遮挡已编码但未被测试覆盖 |
 | 原生纹理导入 | ⛔ 明确返回 `Unsupported`（RHI 缺少 IOSurface 类型，见 §9） |
@@ -33,6 +33,7 @@ test_geometry  : 183 passed
 test_effect    : 111 tests, 110 passed, 1 skipped
 ctest (graphics|backend|geometry|effect|fuzz smoke + effect mac rows): 9/9 Passed
 effect_mac_demo / _metal / _opengl (examples/effect): 4/4 Passed
+mac_demo_verify / _metal / _opengl (examples/graphics/mac): 3/3 Passed
 ```
 
 iOS 模拟器（iPhone 18 Pro, iOS 27.2，`iphonesimulator27.2` SDK，arm64；Vulkan 关闭）结果：
@@ -309,6 +310,27 @@ Metal 的槽位表就是从这些装饰映射出来的）。原先 `modules/grap
 现在改为独立的 `CORAL_GRAPHICS_NEEDS_VULKAN_SHADER_SET = VULKAN OR METAL`，并且只在真正生成该集合时才把目录传给
 嵌入脚本（脚本对“传了目录却不存在”是报错而不是静默跳过）。
 
+### 7.16 `mac_demo` 的 Metal 窗口路径
+
+原先 `mac_demo` 只有 `NSOpenGLView + CGL` 一条窗口路径，`--backend metal` 会被直接拒绝。现在两条路径并存：
+
+- **Metal（默认）**：一个普通 `NSView`，`makeBackingLayer` 返回 `CAMetalLayer`；`wantsLayer = YES` 之后把
+  `view.layer` 作为 `WindowSurface::Configuration::nativeWindow` 交给门面，并置
+  `nativeWindowSystem = NativeWindowSystem::Metal`。这条路径不创建任何 CGL 上下文。
+- **OpenGL**：保留原来的 `NSOpenGLView`；`cglContext` 继续通过 `Configuration::cglContext` 交给后端。
+
+几个容易踩的点：
+
+1. `CAMetalLayer.drawableSize` 是**像素**，不是 point。demo 用 `convertRectToBacking:` 计算 backing 尺寸，窗口在
+   Retina 屏上 960x540 point 对应 1920x1080 像素；`WindowSurface::resize` → `resizeSwapchain` 会更新 drawableSize。
+2. `createSurface` 会校验 `layer.device`：nil 时填入本设备，指向另一个 `MTLDevice` 时拒绝；`mac_demo` 因此必须在
+   `WindowSurface::make` 之后再检查 device 的 backend，防止 `allowFallback` 把它悄悄换成 OpenGL。
+3. 窗口的 `present()` 路径没有变化：`WindowSurface` 渲染到内部 UI target，再用一次 blit 画到
+   `defaultFramebufferView()`；Metal 后端把该哨兵解析成当前 `CAMetalDrawable`。
+4. 该路径是**手工验证**的：`mac_demo --frames 3 --immediate --backend metal --snapshot /tmp/mac_metal.png` 成功
+   呈现 3 帧并写出 1920x1080 PNG，画面与 OpenGL 路径一致。窗口模式依赖窗口服务器，因此 CTest 只注册
+   `--verify` 的三条离屏用例（auto/metal/opengl），不注册开窗用例。
+
 ---
 
 ## 8. 验证记录
@@ -389,6 +411,25 @@ OpenGL: matches Metal
 verified: 2, unavailable: 0, failed: 0
 ```
 
+### 8.4 `mac_demo` 的 Metal 窗口路径
+
+```sh
+# 离屏验证（CTest 覆盖，三条）
+./build-mac/bin/mac_demo --verify --backend metal
+./build-mac/bin/mac_demo --verify --backend opengl
+./build-mac/bin/mac_demo --verify                 # auto -> Metal
+
+# 开窗实跑（需要窗口服务器；CTest 不注册）
+./build-mac/bin/mac_demo --frames 3 --immediate --backend metal --snapshot /tmp/mac_metal.png
+# mac_demo: Apple M6 (Apple, Metal 2.2+, coral/backend/metal)
+# mac_demo: present mode Immediate, 1920x1080 pixels
+# mac_demo: presented 3 frame(s) ...
+
+./build-mac/bin/mac_demo --frames 1 --immediate --backend opengl --snapshot /tmp/mac_gl.png
+```
+
+两张快照都是 1920x1080（窗口 960x540 point @2x），Metal 与 OpenGL 的画面一致。
+
 关键证据（Metal 专属）：
 
 - `PlatformRunner.IndexedDrawsKeepTheirIndicesWhenTheVertexArrayChanges`：Metal 首轮输出
@@ -415,7 +456,7 @@ verified: 2, unavailable: 0, failed: 0
 7. **`MTLHeap` / 子分配未使用。** 每次资源创建是一次 `newTexture`/`newBuffer`；高频创建/销毁的场景可引入 heap 或自有子分配器。
 8. **查询覆盖有限。** 时间戳依赖 blit 采样点；遮挡查询已编码但未被测试覆盖；`PipelineStatisticsQuery` 明确不支持。`isQueryResultAvailable` 恒为 `true`（Metal 没有逐查询可用性信号）。
 9. **校验层。** `DeviceConfiguration::enableValidation` 无法在运行时打开 Metal Validation（它由 Xcode scheme 或环境变量控制），已在 `appendDiagnostics` 里如实说明。建议调试时使用 `MTL_DEBUG_LAYER=1`/Xcode 的 Metal Validation。
-10. **窗口演示。** 目前没有使用 `CAMetalLayer` 的 macOS/iOS 演示程序；`WindowSurface` 的 Metal 路径逻辑已完成，但需要宿主视图（`NSView`/`UIView` 的 `layerClass` 改为 `CAMetalLayer`）才能被自动化覆盖。`examples/graphics/mac` 的 `mac_demo` 仍走 CGL/OpenGL。
+10. **窗口路径的自动化覆盖。** `mac_demo` 现在有可用的 Metal 窗口路径（§7.16），但它依赖窗口服务器，所以 CTest 只覆盖它的 `--verify` 离屏模式；开窗模式仍是手工验证。iOS 侧没有对应的窗口演示（`examples/graphics` 不构建 iOS demo）。
 11. **每管线重复 MSL 编译。** 同一 shader module 被多个管线使用时重复 `newLibraryWithSource:`。可加 `(module, pipelineLayout)` 缓存，或在 `MetalShaderModule` 里缓存“单 set 布局”的常见情形。
 12. **`MTLRenderPipelineDescriptor` 未使用 `inputPrimitiveTopology`/layered rendering**；`SampleRateShading`、geometry/tessellation 能力声明为不支持（与实现一致）。
 
@@ -455,7 +496,11 @@ verified: 2, unavailable: 0, failed: 0
                                                  Metal 排到首位、implemented=true、MSAA 用例覆盖 Metal
   README.md / modules/graphics/README.md         Metal 选项、默认后端、目录与说明
   examples/effect/CMakeLists.txt                 新增 effect_mac_demo 与 3 条 CTest
+  examples/graphics/mac/demo_main.mm             mac_demo 的 Metal 窗口路径（CAMetalLayer）与 --backend 选择
+  examples/graphics/mac/demo_options.h           backend 取值更新为 auto|metal|opengl
+  examples/graphics/mac/CMakeLists.txt           Metal/QuartzCore 链接与三条 verify CTest
   examples/README.md                             macOS 验证命令、测试表、Metal 默认后端说明
+  README.md                                       macOS demo 说明（Metal 默认窗口）
 ```
 
 ---

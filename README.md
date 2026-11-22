@@ -187,15 +187,18 @@ ctest --test-dir out/examples --output-on-failure
 
 `graphics_demo` writes a PNG rather than opening a window, so it runs anywhere; the Vulkan verification,
 the windowed Lottie players and the effect demos skip (exit code 77) when the device or display they
-need is not there. On macOS the demo set is `mac_demo` (a Cocoa window over CGL/OpenGL 4.1, presenting
-through `gpu::WindowSurface`) plus the effect demos (`effect_demo`, `effect_benchmark` and the macOS
+need is not there. On macOS the demo set is `mac_demo` (a Cocoa window presenting through
+`gpu::WindowSurface`: a `CAMetalLayer` for Metal, which is the default, or an `NSOpenGLView`/CGL context
+with `--backend opengl`) plus the effect demos (`effect_demo`, `effect_benchmark` and the macOS
 verification `effect_mac_demo`). The macOS `examples/graphics` window is interactive; `--verify` is the
 offscreen path for a build machine:
 
 ```sh
-out/examples/bin/mac_demo                          # windowed, runs until closed or Esc/Q
+out/examples/bin/mac_demo                          # windowed Metal, runs until closed or Esc/Q
+out/examples/bin/mac_demo --backend opengl          # windowed OpenGL/CGL
 out/examples/bin/mac_demo --frames 120 --immediate
 out/examples/bin/mac_demo --frames 1 --snapshot out/mac_demo.png   # windowed, then read the frame back
+out/examples/bin/mac_demo --verify --backend metal  # offscreen; no display required
 out/examples/bin/mac_demo --verify --backend opengl
 
 out/examples/bin/effect_mac_demo                   # Metal + OpenGL offscreen: colour bars and cross-backend match

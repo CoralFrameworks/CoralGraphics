@@ -61,9 +61,11 @@ out/examples/bin/Release/lottie_player.exe --animation modules/graphics/resource
 cmake -S examples -B out/examples -G "Unix Makefiles" -DCMAKE_BUILD_TYPE=Release
 cmake --build out/examples -j8
 
-out/examples/bin/mac_demo                          # windowed; Esc/Q or close the window to exit
+out/examples/bin/mac_demo                          # windowed Metal; Esc/Q or close the window to exit
+out/examples/bin/mac_demo --backend opengl          # windowed OpenGL/CGL
 out/examples/bin/mac_demo --frames 120 --immediate
 out/examples/bin/mac_demo --frames 1 --snapshot out/mac_demo.png   # windowed, then read the frame back
+out/examples/bin/mac_demo --verify --backend metal  # offscreen; no display required
 out/examples/bin/mac_demo --verify --backend opengl
 
 out/examples/bin/effect_mac_demo                     # Metal + OpenGL: colour bars, and the backends agree
@@ -76,10 +78,12 @@ container, or in a session with no display. The windowed programs and the effect
 display or a GPU is the subject.
 
 On macOS the demo project builds `mac_demo` from `graphics/mac/` and `effect_demo`,
-`effect_benchmark` and `effect_mac_demo` from `effect/`. `mac_demo` is the Cocoa/OpenGL window: it owns
-an `NSOpenGLView` and its `NSOpenGLContext`, and hands the CGL context to `gpu::WindowSurface`, so the
-frame goes straight to the view's drawable. `--verify` renders the same scene through an offscreen
-`gpu::Surface`, which is what a machine without a display runs.
+`effect_benchmark` and `effect_mac_demo` from `effect/`. `mac_demo` is the Cocoa window and has two
+forms: by default it is a plain `NSView` whose backing layer is a `CAMetalLayer`, handed to
+`gpu::WindowSurface` as the drawable, so the frame is presented by Metal with no CGL context involved;
+`--backend opengl` instead owns an `NSOpenGLView` and its `NSOpenGLContext` and hands the CGL context to
+the same facade. `--verify` renders the same scene through an offscreen `gpu::Surface`, which is what a
+machine without a display runs.
 
 The effect demos bring up an offscreen device through the RHI, which on macOS is **Metal by default**
 with OpenGL as the fallback. `effect_demo` is the minimal client - one graph, one frame, the centre
@@ -109,7 +113,7 @@ registered:
 |---|---|
 | `graphics_demo_raster` | the rasterizer and the PNG codec produce the demo picture |
 | `vulkan_demo_checks`, `vulkan_demo_checks_render_pass` | the Vulkan backend draws and reads back the measured colours, through both the dynamic-rendering and render-pass paths |
-| `mac_demo_verify` | the CGL window path's scene renders and reads back through the offscreen device |
+| `mac_demo_verify`, `mac_demo_verify_metal`, `mac_demo_verify_opengl` | the window scene renders and reads back through the offscreen device, once per backend (the first row follows the platform, which is Metal) |
 | `effect_demo` | the effect graph runs end to end |
 | `effect_mac_demo`, `effect_mac_demo_metal`, `effect_mac_demo_opengl` | on macOS: the colour bars are right, and the backends produce the same frame (the per-backend rows pin one backend each) |
 | `effect_window_demo`, `effect_transition_demo` | the Windows swap-chain output and the preload/transition path |
