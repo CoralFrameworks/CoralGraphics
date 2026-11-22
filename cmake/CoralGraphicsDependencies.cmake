@@ -42,7 +42,17 @@ option(CORAL_GRAPHICS_SUPPORTS_WEBP "Build the WebP codec" ON)
 option(CORAL_GRAPHICS_SUPPORTS_FONTS "Build the font stack" ON)
 option(CORAL_GRAPHICS_SUPPORTS_JSON "Build the JSON/Lottie reader" ON)
 option(CORAL_BACKEND_SUPPORTS_OPENGL "Build the OpenGL backend" ON)
-option(CORAL_BACKEND_SUPPORTS_VULKAN "Build the Vulkan backend" ON)
+# Vulkan is not offered on Apple platforms; see the longer note in the root CMakeLists.txt. Declared here as well because
+# this file runs before the framework root in the examples project.
+if (APPLE)
+  if (CORAL_BACKEND_SUPPORTS_VULKAN)
+    message(STATUS "CoralGraphics: the Vulkan backend is not offered on Apple platforms; Metal is the Apple backend")
+  endif ()
+  set(CORAL_BACKEND_SUPPORTS_VULKAN OFF CACHE BOOL
+      "Build the Vulkan backend (not offered on Apple platforms)" FORCE)
+else ()
+  option(CORAL_BACKEND_SUPPORTS_VULKAN "Build the Vulkan backend" ON)
+endif ()
 option(CORAL_BACKEND_SUPPORTS_SPIRV_CROSS "Build SPIRV-Cross" ON)
 option(CORAL_BACKEND_SUPPORTS_SHADERC "Build shaderc" ON)
 option(CORAL_SHADERC_SYNC_DEPS "Run shaderc git-sync-deps when its nested third_party tree is absent" ON)

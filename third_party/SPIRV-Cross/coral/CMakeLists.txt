@@ -43,11 +43,16 @@ set(TARGET SPIRV-Cross)
 # and from a standalone development build.
 get_filename_component(SPIRV_CROSS_DIR "${CMAKE_CURRENT_LIST_DIR}/.." ABSOLUTE)
 
+# Both consumers are built: the OpenGL backend needs CompilerGLSL and the Metal backend needs CompilerMSL. The Metal
+# backend's MSL backend is the larger of the two by a wide margin, and a GL-only application pays for it in archive size
+# rather than in run time -- the linker discards what is not referenced, and the localised MSVC/ninja configuration that
+# cannot see header dependencies would otherwise need a second library variant.
 set(SRCS
     ${SPIRV_CROSS_DIR}/spirv_cfg.cpp
     ${SPIRV_CROSS_DIR}/spirv_cross.cpp
     ${SPIRV_CROSS_DIR}/spirv_cross_parsed_ir.cpp
     ${SPIRV_CROSS_DIR}/spirv_glsl.cpp
+    ${SPIRV_CROSS_DIR}/spirv_msl.cpp
     ${SPIRV_CROSS_DIR}/spirv_parser.cpp
 )
 
@@ -70,6 +75,7 @@ set(PUBLIC_HDRS
     ${SPIRV_CROSS_DIR}/spirv_cross_error_handling.hpp
     ${SPIRV_CROSS_DIR}/spirv_cross.hpp
     ${SPIRV_CROSS_DIR}/spirv_glsl.hpp
+    ${SPIRV_CROSS_DIR}/spirv_msl.hpp
     ${SPIRV_CROSS_DIR}/spirv_parser.hpp
 )
 

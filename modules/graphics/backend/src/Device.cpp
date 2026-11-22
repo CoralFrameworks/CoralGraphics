@@ -30,6 +30,12 @@
 #include "private/backend/vulkan/VulkanDevice.h"
 #endif
 
+#if CORAL_BACKEND_HAS_METAL
+// A plain C++ header: the Metal implementation is Objective-C++ and must not leak Metal types into this translation
+// unit. See MetalFactory.h.
+#include "private/backend/metal/MetalFactory.h"
+#endif
+
 namespace backend {
 namespace {
 
@@ -83,8 +89,9 @@ const BackendAvailability* findBackend(Backend backend) {
  *  - **Windows**: Vulkan, then OpenGL 4.1+. Those two between them cover every device the engine can
  *    run on, which is why Direct3D is deliberately absent rather than merely unwritten.
  *  - **Linux**: Vulkan, then OpenGL 4.1+.
- *  - **macOS**: Metal, then Vulkan (via MoltenVK), then OpenGL 4.1+. OpenGL is last because Apple
- *    deprecated it, but it is still the only always-present option on older systems.
+ *  - **macOS**: Metal, then OpenGL 4.1+. OpenGL is last because Apple deprecated it, but it is still
+ *    present on older systems. Vulkan is deliberately absent: it is not built on Apple platforms (see
+ *    `CORAL_BACKEND_SUPPORTS_VULKAN` in the root CMakeLists), so naming it here could only ever fail.
  *  - **Android**: Vulkan, then OpenGL ES 3.0+.
  *  - **iOS**: Metal, then OpenGL ES 3.0+.
  *
@@ -126,7 +133,6 @@ const Backend* defaultPriority(uint32_t* outCount) {
     Backend::OpenGL,
 #elif defined(CORAL_BUILD_FOR_MAC)
     Backend::Metal,
-    Backend::Vulkan,
     Backend::OpenGL,
 #else
     // Linux and anything else unix-like.
@@ -179,11 +185,18 @@ Result createBackendDevice(const Backend backend, const DeviceConfiguration& con
 #endif
     }
 
-    case Backend::Metal:
+    case Backend::Metal: {
+#if CORAL_BACKEND_HAS_METAL
+      // The construction lives in MetalDevice.mm, behind a C++ factory, because this translation unit cannot include a
+      // header that imports Metal. The ownership handover is the same as the two branches above.
+      return metal::createMetalDevice(configuration, outDevice);
+#else
+      return Result::Unsupported;
+#endif
+    }
+
     case Backend::Null:
-      // Not implemented yet. The RHI's public API is deliberately shaped so that each of these is a
-      // translation of the same resource and command-buffer model rather than a redesign; see
-      // docs/backend/BackendMatrix.md for the mapping each one needs.
+      // Not implemented, and not expected: `Null` is the factory's "no preference" sentinel, never a device.
       return Result::Unsupported;
   }
   return Result::Unsupported;

@@ -80,7 +80,28 @@ option(CORAL_GRAPHICS_SUPPORTS_WEBP "Build the WebP codec" ON)
 option(CORAL_GRAPHICS_SUPPORTS_FONTS "Build the font stack" ON)
 option(CORAL_GRAPHICS_SUPPORTS_JSON "Build the JSON/Lottie reader" ON)
 option(CORAL_BACKEND_SUPPORTS_OPENGL "Build the OpenGL backend" ON)
-option(CORAL_BACKEND_SUPPORTS_VULKAN "Build the Vulkan backend" ON)
+# ## Vulkan is not offered on Apple platforms
+#
+# macOS and iOS have Metal as their native backend and no Vulkan loader; compiling the Vulkan backend there produced a
+# build whose only effect was a "no Vulkan loader could be opened" error in every device-creation attempt, followed by a
+# silent fall-through. The option is therefore forced off there rather than kept as a default that cannot work. Windows,
+# Linux and Android keep it on by default.
+if (APPLE)
+  if (CORAL_BACKEND_SUPPORTS_VULKAN)
+    message(STATUS "CoralGraphics: the Vulkan backend is not offered on Apple platforms; Metal is the Apple backend")
+  endif ()
+  set(CORAL_BACKEND_SUPPORTS_VULKAN OFF CACHE BOOL
+      "Build the Vulkan backend (not offered on Apple platforms)" FORCE)
+else ()
+  option(CORAL_BACKEND_SUPPORTS_VULKAN "Build the Vulkan backend" ON)
+endif ()
+# Metal is an Apple-only backend, so its default follows the platform rather than the project. Turning it on elsewhere
+# is refused at configure time by modules/graphics/backend/CMakeLists.txt rather than by a link failure.
+if (APPLE)
+  option(CORAL_BACKEND_SUPPORTS_METAL "Build the Metal backend" ON)
+else ()
+  option(CORAL_BACKEND_SUPPORTS_METAL "Build the Metal backend" OFF)
+endif ()
 option(CORAL_BACKEND_SUPPORTS_SPIRV_CROSS "Build SPIRV-Cross" ON)
 option(CORAL_BACKEND_SUPPORTS_SHADERC "Build shaderc" ON)
 option(CORAL_SUPPORTS_FFMPEG "Build FFmpeg integration" OFF)

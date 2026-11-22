@@ -59,12 +59,27 @@ after the initial checkout.
 
 On macOS the prerequisites are the Xcode Command Line Tools (`xcode-select --install`, which also
 provides the Python 3 the shader-embedding step uses) and CMake 3.19 or newer (Homebrew's `cmake`, or
-the CMake.app bundle). The OpenGL backend is the system driver: CGL creates an OpenGL 4.1 core context,
-which is the highest version Apple provides and the desktop dialect the RHI targets. Vulkan is compiled
-in but the system has no Vulkan loader, so the Vulkan cases skip themselves rather than fail, and the
-OpenGL cases are the ones that run. `test_backend` prints the negotiated device (for example
-`Apple M...`, `OpenGL 4.1 core`, `CGL`) and its extension list, which is the quickest way to confirm
-the context is real.
+the CMake.app bundle). **Metal is the default backend**: `CORAL_BACKEND_SUPPORTS_METAL` is on for an
+Apple configure, SPIR-V shaders are translated to MSL with SPIRV-Cross, and the OpenGL backend remains
+compiled in as the fallback. **Vulkan is not offered on Apple platforms**: the option is forced off
+there, because macOS and iOS have Metal as their native backend and no Vulkan loader, so a Vulkan
+build could only report `Unsupported` after a failed loader lookup. `test_backend` prints the
+negotiated device for every backend it can create (`Apple M...` / `Metal 2.2+` / `coral/backend/metal`,
+and `OpenGL 4.1 core` / `CGL`) which is the quickest way to confirm both are real:
+
+```sh
+# The Metal backend on its own, the way a regression run pins it
+CORAL_RHI_BACKEND=metal ./build/modules/graphics/backend/test_backend
+CORAL_RHI_BACKEND=opengl ./build/modules/graphics/backend/test_backend
+
+# The whole suite, macOS
+ctest --test-dir build -R "test_(graphics|backend|geometry)|effect_(demo|public_header_boundary)" \
+      --output-on-failure
+```
+
+`modules/graphics/backend/src/metal/` holds the implementation and
+`Metal后端实现进度与问题记录.md` records its status, its design decisions, its verified results on macOS
+and the iOS simulator, and what it does not do yet.
 
 The macOS `ctest` line names this repository's suites rather than running everything: a standalone
 tree also registers the vendored libjpeg-turbo command-line tests, whose executables the codec wrapper
@@ -75,8 +90,16 @@ CoralGraphics check -- facade, backend, geometry, effect, shader/fuzz smoke and 
 ### iOS
 
 iOS is a cross build from a macOS host with full Xcode (the Command Line Tools alone have no iOS SDK).
-Its OpenGL backend is OpenGL ES 3.0 through EAGL, not EGL, so the platform layer is
-`GlPlatformEagl.mm`; an offscreen device needs no window and the tests run in the simulator.
+Its default backend is Metal (`CAMetalLayer` for presentation, `MTLDevice` for everything else), and its
+OpenGL backend is OpenGL ES 3.0 through EAGL, not EGL, so that platform layer is `GlPlatformEagl.mm`; an
+offscreen device needs no window and the tests run in the simulator.
+
+**If `xcode-select -p` still reports the Command Line Tools**, `xcrun --sdk iphonesimulator` and
+`xcrun metal` fail even though Xcode is installed. Either select Xcode once
+(`sudo xcode-select -s /Applications/Xcode.app`) or prefix the commands below with
+`DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer`. The Metal backend compiles MSL at run time
+with `newLibraryWithSource:`, so the Metal toolchain's offline compiler is not a build prerequisite; the
+SDK headers are.
 
 ```sh
 # The build-time shader compiler is a host tool. Build it in the host tree first so the iOS build
@@ -164,16 +187,28 @@ ctest --test-dir out/examples --output-on-failure
 
 `graphics_demo` writes a PNG rather than opening a window, so it runs anywhere; the Vulkan verification,
 the windowed Lottie players and the effect demos skip (exit code 77) when the device or display they
-need is not there. On macOS the demo set is `mac_demo` (a Cocoa window over CGL/OpenGL 4.1, presenting
-through `gpu::WindowSurface`) plus the effect demos (`effect_demo`, `effect_benchmark`). The macOS
-`examples/graphics` window is interactive; `--verify` is the offscreen path for a build machine:
+need is not there. On macOS the demo set is `mac_demo` (a Cocoa window presenting through
+`gpu::WindowSurface`: a `CAMetalLayer` for Metal, which is the default, or an `NSOpenGLView`/CGL context
+with `--backend opengl`) plus the effect demos (`effect_demo`, `effect_benchmark` and the macOS
+verification `effect_mac_demo`). The macOS `examples/graphics` window is interactive; `--verify` is the
+offscreen path for a build machine:
 
 ```sh
-out/examples/bin/mac_demo                          # windowed, runs until closed or Esc/Q
+out/examples/bin/mac_demo                          # windowed Metal, runs until closed or Esc/Q
+out/examples/bin/mac_demo --backend opengl          # windowed OpenGL/CGL
 out/examples/bin/mac_demo --frames 120 --immediate
 out/examples/bin/mac_demo --frames 1 --snapshot out/mac_demo.png   # windowed, then read the frame back
+out/examples/bin/mac_demo --verify --backend metal  # offscreen; no display required
 out/examples/bin/mac_demo --verify --backend opengl
+
+out/examples/bin/effect_mac_demo                   # Metal + OpenGL offscreen: colour bars and cross-backend match
+out/examples/bin/effect_mac_demo --backend metal   # pinned; a fallback to another backend is a failure
 ```
+
+`effect_mac_demo` renders the deterministic colour-bar graph through the effect engine on every backend the
+machine can bring up, checks the bars at their centres and compares the backends' frames, so a backend that
+draws a wrong or blank picture fails with the pixel named. It is registered with CTest together with a pinned
+row per backend.
 
 There is no macOS `graphics_demo`/`lottie_player`: those two are the Win32 and X11/Wayland window
 implementations, while `mac_demo` is the Cocoa counterpart.

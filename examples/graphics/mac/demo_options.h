@@ -32,7 +32,7 @@ struct Options {
   bool immediate = false;
   /** Render one offscreen frame instead of opening a window. */
   bool verify = false;
-  /** "auto" or "opengl"; the macOS window path is CGL/OpenGL. */
+  /** "auto", "metal" or "opengl". `auto` is Metal when this build has it, otherwise OpenGL. */
   std::string backend = "auto";
   /** Optional PNG written from the window's readback, for checking the presented frame without a screenshot. */
   std::string snapshot;
