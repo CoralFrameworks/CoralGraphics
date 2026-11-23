@@ -29,12 +29,180 @@
 #include <utility>
 
 #include FT_FREETYPE_H
+#include FT_MULTIPLE_MASTERS_H
 #include FT_OUTLINE_H
+#include FT_SFNT_NAMES_H
+#include FT_TRUETYPE_IDS_H
 #include FT_TRUETYPE_TABLES_H
+
+#include <array>
+#include <cctype>
+#include <cstdint>
+#include <cstdio>
+#include <cstring>
+#include <memory>
+#include <string>
+#include <unordered_map>
 
 namespace graphics {
 
 namespace {
+
+/** @return the tag as the four characters a font table uses, or 0 when @p tag is not four bytes. */
+FT_ULong tagFromString(const std::string& tag) noexcept {
+  if (tag.size() != 4) return 0;
+  FT_ULong value = 0;
+  for (const char character: tag) {
+    value = (value << 8) | static_cast<unsigned char>(character);
+  }
+  return value;
+}
+
+/** @return the four characters @p tag stands for, as the string the public API uses. */
+std::string stringFromTag(const FT_ULong tag) {
+  std::string text(4, '\0');
+  text[0] = static_cast<char>((tag >> 24) & 0xFFu);
+  text[1] = static_cast<char>((tag >> 16) & 0xFFu);
+  text[2] = static_cast<char>((tag >> 8) & 0xFFu);
+  text[3] = static_cast<char>(tag & 0xFFu);
+  return text;
+}
+
+/** @return a 16.16 fixed value as the float a caller reads. */
+float fixedToFloat(const FT_Fixed value) noexcept {
+  return static_cast<float>(value) / 65536.0f;
+}
+
+/** @return @p value as a 16.16 fixed value, rounded to the nearest representable position. */
+FT_Fixed floatToFixed(const float value) noexcept {
+  return static_cast<FT_Fixed>(std::llround(static_cast<double>(value) * 65536.0));
+}
+
+/**
+ * Decodes a `name` table string into UTF-8.
+ *
+ * The `name` table stores its strings in the encoding of the platform and encoding IDs of the record,
+ * not as UTF-8. Windows records are UTF-16BE; Macintosh records are a legacy single-byte encoding.
+ * Only the two encodings that matter for font and instance names are handled; anything else returns an
+ * empty string rather than a string of the right length made of the wrong characters.
+ */
+std::string decodeName(const FT_SfntName& name) {
+  if (name.string == nullptr || name.string_len == 0) return {};
+  if (name.platform_id == TT_PLATFORM_MICROSOFT && name.encoding_id != TT_MS_ID_SYMBOL_CS) {
+    // UTF-16BE to UTF-8. Surrogate pairs are handled because a font name is allowed to use them, and a
+    // half-decoded pair would produce a name that does not compare equal to the same name elsewhere.
+    std::string text;
+    text.reserve(name.string_len);
+    uint32_t high = 0;
+    for (size_t index = 0; index + 1 < name.string_len; index += 2) {
+      const uint32_t unit = (static_cast<uint32_t>(name.string[index]) << 8) |
+                            static_cast<uint32_t>(name.string[index + 1]);
+      uint32_t codePoint = 0;
+      if (unit >= 0xD800 && unit <= 0xDBFF) {
+        high = unit;
+        continue;
+      }
+      if (unit >= 0xDC00 && unit <= 0xDFFF && high != 0) {
+        codePoint = 0x10000 + ((high - 0xD800) << 10) + (unit - 0xDC00);
+        high = 0;
+      } else {
+        codePoint = unit;
+      }
+      if (codePoint < 0x80) {
+        text.push_back(static_cast<char>(codePoint));
+      } else if (codePoint < 0x800) {
+        text.push_back(static_cast<char>(0xC0 | (codePoint >> 6)));
+        text.push_back(static_cast<char>(0x80 | (codePoint & 0x3F)));
+      } else if (codePoint < 0x10000) {
+        text.push_back(static_cast<char>(0xE0 | (codePoint >> 12)));
+        text.push_back(static_cast<char>(0x80 | ((codePoint >> 6) & 0x3F)));
+        text.push_back(static_cast<char>(0x80 | (codePoint & 0x3F)));
+      } else {
+        text.push_back(static_cast<char>(0xF0 | (codePoint >> 18)));
+        text.push_back(static_cast<char>(0x80 | ((codePoint >> 12) & 0x3F)));
+        text.push_back(static_cast<char>(0x80 | ((codePoint >> 6) & 0x3F)));
+        text.push_back(static_cast<char>(0x80 | (codePoint & 0x3F)));
+      }
+    }
+    return text;
+  }
+  if (name.platform_id == TT_PLATFORM_MACINTOSH) {
+    return std::string(reinterpret_cast<const char*>(name.string), name.string_len);
+  }
+  return {};
+}
+
+/** @return the `name` table string with id @p nameId, or empty when the table has none. */
+std::string nameForId(const FT_Face face, const FT_UInt nameId) {
+  const FT_UInt count = FT_Get_Sfnt_Name_Count(face);
+  for (FT_UInt index = 0; index < count; ++index) {
+    FT_SfntName name {};
+    if (FT_Get_Sfnt_Name(face, index, &name) != 0) continue;
+    if (name.name_id != nameId) continue;
+    const std::string decoded = decodeName(name);
+    if (!decoded.empty()) return decoded;
+  }
+  return {};
+}
+
+/** Reads the face's axes, named instances and current design position into the out parameters. */
+void readVariations(const FT_Library library, const FT_Face face, std::vector<FontVariationAxis>& axes,
+        std::vector<FontNamedInstance>& instances, std::vector<FontVariation>& current) {
+  axes.clear();
+  instances.clear();
+  current.clear();
+  if (face == nullptr || !FT_HAS_MULTIPLE_MASTERS(face)) return;
+
+  FT_MM_Var* master = nullptr;
+  if (FT_Get_MM_Var(face, &master) != 0 || master == nullptr) return;
+
+  axes.reserve(master->num_axis);
+  for (FT_UInt index = 0; index < master->num_axis; ++index) {
+    const FT_Var_Axis& axis = master->axis[index];
+    FontVariationAxis described;
+    described.tag = stringFromTag(axis.tag);
+    described.name = axis.name != nullptr ? axis.name : nameForId(face, axis.strid);
+    described.minValue = fixedToFloat(axis.minimum);
+    described.defaultValue = fixedToFloat(axis.def);
+    described.maxValue = fixedToFloat(axis.maximum);
+    FT_UInt flags = 0;
+    if (FT_Get_Var_Axis_Flags(master, index, &flags) == 0) {
+      described.hidden = (flags & FT_VAR_AXIS_FLAG_HIDDEN) != 0;
+    }
+    axes.push_back(std::move(described));
+  }
+
+  // The current position is the face's design coordinates. FreeType reports the default position for a
+  // face that has never been varied, which is what a caller expects `variations()` to start from.
+  std::vector<FT_Fixed> coordinates(master->num_axis, 0);
+  if (FT_Get_Var_Design_Coordinates(face, master->num_axis, coordinates.data()) == 0) {
+    current.reserve(master->num_axis);
+    for (FT_UInt index = 0; index < master->num_axis; ++index) {
+      current.push_back(FontVariation { axes[index].tag, fixedToFloat(coordinates[index]) });
+    }
+  } else {
+    for (const FontVariationAxis& axis: axes) {
+      current.push_back(FontVariation { axis.tag, axis.defaultValue });
+    }
+  }
+
+  instances.reserve(master->num_namedstyles);
+  for (FT_UInt index = 0; index < master->num_namedstyles; ++index) {
+    const FT_Var_Named_Style& named = master->namedstyle[index];
+    FontNamedInstance instance;
+    instance.name = nameForId(face, named.strid);
+    if (instance.name.empty()) instance.name = "Instance " + std::to_string(index + 1);
+    instance.variations.reserve(master->num_axis);
+    for (FT_UInt axisIndex = 0; axisIndex < master->num_axis; ++axisIndex) {
+      const float value = named.coords != nullptr ? fixedToFloat(named.coords[axisIndex])
+                                                  : axes[axisIndex].defaultValue;
+      instance.variations.push_back(FontVariation { axes[axisIndex].tag, value });
+    }
+    instances.push_back(std::move(instance));
+  }
+
+  FT_Done_MM_Var(library, master);
+}
 
 /**
  * @return the style a face declares, read from its tables.
@@ -109,6 +277,15 @@ void Typeface::populateFromFace(void* faceHandle) {
   if (const char* psName = FT_Get_Postscript_Name(face)) {
     typeface.mPostScriptName = psName;
   }
+
+  // The variation tables are read here rather than lazily so that `variationAxes()` is a field read.
+  // `FT_Get_MM_Var` allocates, and doing it on every axis query would make a UI that layouts text
+  // every frame pay for the font's table walk every frame.
+  const FT_Library library = typeface.mImpl != nullptr && typeface.mImpl->library != nullptr
+          ? typeface.mImpl->library->handle()
+          : nullptr;
+  readVariations(library, face, typeface.mVariationAxes, typeface.mNamedInstances,
+          typeface.mVariations);
 }
 
 Typeface::~Typeface() = default;
@@ -167,10 +344,115 @@ std::shared_ptr<Typeface> Typeface::fromMemory(const uint8_t* data, const size_t
   typeface->mImpl = std::make_unique<Impl>();
   typeface->mImpl->library = library;
   typeface->mImpl->face = face;
+  typeface->mImpl->memoryData = data;
+  typeface->mImpl->memorySize = size;
   // Held so that the bytes cannot be freed while FreeType still reads tables out of them.
   typeface->mImpl->owner = std::move(owner);
 
   typeface->populateFromFace(face);
+  return typeface;
+}
+
+std::shared_ptr<Typeface> Typeface::withVariations(const std::vector<FontVariation>& variations,
+        std::string* error) const {
+  const auto fail = [error](std::string message) -> std::shared_ptr<Typeface> {
+    if (error != nullptr) *error = std::move(message);
+    return nullptr;
+  };
+
+  if (mImpl == nullptr || mImpl->face == nullptr || mImpl->library == nullptr) {
+    return fail("the typeface has no FreeType face");
+  }
+  if (!hasVariations()) {
+    return fail("the face has no variation axes; it is a static font");
+  }
+
+  FT_MM_Var* master = nullptr;
+  if (FT_Get_MM_Var(mImpl->face, &master) != 0 || master == nullptr) {
+    return fail("the face's variation table could not be read");
+  }
+  struct MasterGuard {
+    FT_Library library;
+    FT_MM_Var* master;
+    ~MasterGuard() {
+      if (master != nullptr) FT_Done_MM_Var(library, master);
+    }
+  } guard { mImpl->library->handle(), master };
+
+  // Start from the position this face already occupies. A caller changing one axis therefore keeps
+  // the others where they are, which is what `withVariations` documents; resending every axis on every
+  // animation frame would also be a second place for the "current position" to be tracked.
+  std::vector<FT_Fixed> coordinates(master->num_axis, 0);
+  for (FT_UInt index = 0; index < master->num_axis; ++index) {
+    const std::string tag = stringFromTag(master->axis[index].tag);
+    const auto current = std::find_if(mVariations.begin(), mVariations.end(),
+            [&tag](const FontVariation& entry) { return entry.tag == tag; });
+    coordinates[index] = current != mVariations.end() ? floatToFixed(current->value) : master->axis[index].def;
+  }
+
+  for (const FontVariation& variation: variations) {
+    const FT_ULong tag = tagFromString(variation.tag);
+    if (tag == 0) {
+      return fail("a variation tag must be exactly four characters: '" + variation.tag + "'");
+    }
+    FT_UInt axisIndex = master->num_axis;
+    for (FT_UInt index = 0; index < master->num_axis; ++index) {
+      if (master->axis[index].tag == tag) {
+        axisIndex = index;
+        break;
+      }
+    }
+    if (axisIndex == master->num_axis) {
+      return fail("the face does not have an axis named '" + variation.tag + "'");
+    }
+    const float minimum = fixedToFloat(master->axis[axisIndex].minimum);
+    const float maximum = fixedToFloat(master->axis[axisIndex].maximum);
+    if (variation.value < minimum || variation.value > maximum) {
+      char message[160] = {};
+      std::snprintf(message, sizeof(message),
+              "the value %.3f for axis '%s' is outside the face's range [%.3f, %.3f]",
+              static_cast<double>(variation.value), variation.tag.c_str(),
+              static_cast<double>(minimum), static_cast<double>(maximum));
+      return fail(message);
+    }
+    coordinates[axisIndex] = floatToFixed(variation.value);
+  }
+
+  const FT_Library library = mImpl->library->handle();
+  FT_Face clone = nullptr;
+  FT_Error cloneError = 0;
+  if (!mImpl->filePath.empty()) {
+    cloneError = FT_New_Face(library, mImpl->filePath.c_str(), static_cast<FT_Long>(mImpl->faceIndex), &clone);
+  } else if (mImpl->memoryData != nullptr && mImpl->memorySize != 0) {
+    // `FT_New_Memory_Face` may patch the tables in place for some formats, which is why it takes a
+    // non-const pointer even though the bytes belong to the caller.
+    cloneError = FT_New_Memory_Face(library, mImpl->memoryData, static_cast<FT_Long>(mImpl->memorySize),
+            static_cast<FT_Long>(mImpl->faceIndex), &clone);
+  } else {
+    return fail("the face has neither a file nor memory bytes to clone");
+  }
+  if (cloneError != 0 || clone == nullptr) {
+    return fail("a copy of the face could not be opened (FreeType error " +
+            std::to_string(static_cast<int>(cloneError)) + ")");
+  }
+
+  const FT_Error setError = FT_Set_Var_Design_Coordinates(clone, master->num_axis, coordinates.data());
+  if (setError != 0) {
+    FT_Done_Face(clone);
+    return fail("the face's design coordinates were refused (FreeType error " +
+            std::to_string(static_cast<int>(setError)) + ")");
+  }
+
+  auto typeface = std::shared_ptr<Typeface>(new Typeface());
+  typeface->mImpl = std::make_unique<Impl>();
+  typeface->mImpl->library = mImpl->library;
+  typeface->mImpl->face = clone;
+  typeface->mImpl->filePath = mImpl->filePath;
+  typeface->mImpl->faceIndex = mImpl->faceIndex;
+  typeface->mImpl->memoryData = mImpl->memoryData;
+  typeface->mImpl->memorySize = mImpl->memorySize;
+  typeface->mImpl->owner = mImpl->owner;
+  typeface->populateFromFace(clone);
   return typeface;
 }
 

@@ -22,6 +22,8 @@
 #include <algorithm>
 #include <cmath>
 #include <limits>
+#include <span>
+#include <vector>
 
 #include FT_FREETYPE_H
 #include FT_TRUETYPE_TABLES_H
@@ -59,6 +61,66 @@ float os2Field(const FT_Face face, const T& member, const float fallback) {
   }
   return fallback;
 }
+
+/**
+ * @return the byte offset of the @p characterIndex'th UTF-8 code point in @p text.
+ *
+ * `FontFeature::start` and `end` are character offsets because that is what a text editor, a syntax
+ * highlighter and a selection range carry. HarfBuzz cluster values are byte offsets into the UTF-8
+ * input, so the two have to be converted at the boundary; doing it here means a caller never has to
+ * know that the encoding is UTF-8 at all.
+ *
+ * An index past the end returns `text.size()`, which turns a range that extends beyond the string into
+ * "to the end" rather than into a range that starts somewhere arbitrary.
+ */
+size_t utf8ByteOffset(const std::string_view text, const uint32_t characterIndex) noexcept {
+  size_t bytes = 0;
+  uint32_t characters = 0;
+  while (bytes < text.size() && characters < characterIndex) {
+    const auto lead = static_cast<unsigned char>(text[bytes]);
+    size_t width = 1;
+    if ((lead & 0xE0u) == 0xC0u) {
+      width = 2;
+    } else if ((lead & 0xF0u) == 0xE0u) {
+      width = 3;
+    } else if ((lead & 0xF8u) == 0xF0u) {
+      width = 4;
+    }
+    bytes = std::min(text.size(), bytes + width);
+    ++characters;
+  }
+  return bytes;
+}
+
+/** @return @p tag as a harfbuzz tag, or 0 when it is not exactly four characters. */
+uint32_t hbTagFromString(const std::string_view tag) noexcept {
+  if (tag.size() != 4) return 0;
+  uint32_t value = 0;
+  for (const char character: tag) value = (value << 8) | static_cast<unsigned char>(character);
+  return value;
+}
+
+#if defined(CORAL_GRAPHICS_HAS_HARFBUZZ)
+/** Converts the caller's feature list into the buffer's cluster space. */
+std::vector<hb_feature_t> hbFeaturesFor(const std::string_view text,
+        const std::span<const FontFeature> features) {
+  std::vector<hb_feature_t> converted;
+  converted.reserve(features.size());
+  for (const FontFeature& feature: features) {
+    const uint32_t tag = hbTagFromString(feature.tag);
+    if (tag == 0) continue;
+    hb_feature_t setting {};
+    setting.tag = tag;
+    setting.value = feature.value;
+    setting.start = static_cast<unsigned int>(utf8ByteOffset(text, feature.start));
+    setting.end = feature.end == UINT32_MAX
+            ? HB_FEATURE_GLOBAL_END
+            : static_cast<unsigned int>(utf8ByteOffset(text, feature.end));
+    converted.push_back(setting);
+  }
+  return converted;
+}
+#endif
 
 } // namespace anonymous
 
@@ -130,6 +192,36 @@ std::shared_ptr<Font> Font::withSize(const float newSize) const {
   // Delegates rather than mutating, so the sizes stay independent and a shaped result stays valid. The
   // typeface is shared, so this is cheap: no file is re-opened and no tables are re-parsed.
   return create(mTypeface, newSize);
+}
+
+std::shared_ptr<Font> Font::withVariations(const std::vector<FontVariation>& variations,
+        std::string* error) const {
+  if (mTypeface == nullptr) {
+    if (error != nullptr) *error = "this font has no typeface";
+    return nullptr;
+  }
+  std::shared_ptr<Typeface> varied = mTypeface->withVariations(variations, error);
+  if (varied == nullptr) return nullptr;
+  return create(std::move(varied), mSize);
+}
+
+bool Font::hasVariations() const noexcept {
+  return mTypeface != nullptr && mTypeface->hasVariations();
+}
+
+const std::vector<FontVariationAxis>& Font::variationAxes() const noexcept {
+  static const std::vector<FontVariationAxis> empty;
+  return mTypeface != nullptr ? mTypeface->variationAxes() : empty;
+}
+
+const std::vector<FontVariation>& Font::variations() const noexcept {
+  static const std::vector<FontVariation> empty;
+  return mTypeface != nullptr ? mTypeface->variations() : empty;
+}
+
+const std::vector<FontNamedInstance>& Font::namedInstances() const noexcept {
+  static const std::vector<FontNamedInstance> empty;
+  return mTypeface != nullptr ? mTypeface->namedInstances() : empty;
 }
 
 void Font::updateMetrics() {
@@ -214,9 +306,13 @@ float Font::advanceForGlyph(const uint32_t glyphId) const noexcept {
 #endif
 }
 
-TextBlob Font::shape(std::string_view text, const Direction direction) const {
+TextBlob Font::shape(std::string_view text, const Direction direction,
+        const std::span<const FontFeature> featureList) const {
   TextBlob blob;
 #if !defined(CORAL_GRAPHICS_HAS_HARFBUZZ)
+  // The fallback shaper has no OpenType feature machinery; refusing to pretend is better than applying
+  // a setting nowhere and reporting success.
+  (void) featureList;
   std::vector<Glyph> glyphs;
   glyphs.reserve(text.size());
   for (size_t index = 0; index < text.size(); ++index) {
@@ -262,7 +358,12 @@ TextBlob Font::shape(std::string_view text, const Direction direction) const {
   // and that mapping is what hit testing needs.
   hb_buffer_set_cluster_level(buffer, HB_BUFFER_CLUSTER_LEVEL_MONOTONE_CHARACTERS);
 
-  hb_shape(mImpl->hbFont, buffer, nullptr, 0);
+  // Features are per run, not per font: the same font draws `liga` off in a code editor and on in a
+  // title, so they ride this call rather than a `Font` or `Typeface` field. An empty span is the
+  // shaper's defaults exactly, which is why the common call has no branch and no allocation.
+  const std::vector<hb_feature_t> features = hbFeaturesFor(text, featureList);
+  hb_shape(mImpl->hbFont, buffer, features.empty() ? nullptr : features.data(),
+          static_cast<unsigned int>(features.size()));
 
   unsigned int glyphCount = 0;
   const hb_glyph_info_t* infos = hb_buffer_get_glyph_infos(buffer, &glyphCount);
@@ -290,8 +391,9 @@ TextBlob Font::shape(std::string_view text, const Direction direction) const {
 #endif
 }
 
-float Font::measureWidth(const std::string_view text, const Direction direction) const {
-  const TextBlob blob = shape(text, direction);
+float Font::measureWidth(const std::string_view text, const Direction direction,
+        const std::span<const FontFeature> featureList) const {
+  const TextBlob blob = shape(text, direction, featureList);
 
   // The blob's advance is in font units, like the advances it sums and the outlines they go with; the caller asked for
   // a layout width, so this is where it becomes pixels. Without the conversion the answer for a 16px font was under

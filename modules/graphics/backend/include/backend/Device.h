@@ -238,15 +238,25 @@ struct SurfaceDescriptor {
 /**
  * The colour space a swapchain presents in.
  *
- * `Srgb` is the SDR default. `Hdr10Pq` asks the surface for a PQ-encoded 10-bit swapchain; the display
- * stage that writes into it applies the encode (`gpu::SurfaceConfiguration::pqOutput`), and
- * `SwapchainInfo::colorSpace` reports what was actually granted.
+ * `Srgb` is the SDR default. `DisplayP3` asks for wide-gamut SDR, `ExtendedLinearP3` for a 16-bit
+ * float EDR surface and `Hdr10Pq` for a PQ-encoded 10-bit swapchain. The graphics presentation pass
+ * writes the encoding the granted space needs; `SwapchainInfo::colorSpace` reports which was actually
+ * granted.
  */
 enum class SwapchainColorSpace : uint8_t {
   /** `VK_COLOR_SPACE_SRGB_NONLINEAR_KHR`, the SDR default. */
   Srgb,
   /** `VK_COLOR_SPACE_DISPLAY_P3_NONLINEAR_EXT`, wide-gamut SDR. */
   DisplayP3,
+  /**
+   * Extended-linear Display P3, a 16-bit-float EDR surface.
+   *
+   * This is the macOS/iOS extended-range path: values above 1.0 are light above diffuse white, and
+   * the window server tone-maps them onto the display's headroom instead of clipping. It is not
+   * `VK_COLOR_SPACE_DISPLAY_P3_LINEAR_EXT` -- that one is linear P3 without the extended range -- so a
+   * Vulkan surface that offers only the latter falls back to `Srgb`.
+   */
+  ExtendedLinearP3,
   /** `VK_COLOR_SPACE_HDR10_ST2084_EXT`, PQ-encoded HDR10. */
   Hdr10Pq,
 };
@@ -962,6 +972,29 @@ class Device {
    * before returning, preserving the historical synchronous contract.
    */
   virtual Result beginFrame(SwapchainHandle swapchain, SwapchainInfo* outInfo, SemaphoreHandle signalSemaphore) = 0;
+
+  /**
+   * Begins the frame with a drawable the caller already owns.
+   *
+   * `CAMetalDisplayLink` hands its delegate a `CAMetalDrawable` at the display's target presentation
+   * time. Acquiring a second drawable from the layer would either block until the display link's
+   * drawable is presented or present two images for one tick, so the Metal backend accepts the one the
+   * display link supplied through this call.
+   *
+   * @p nativeDrawable is a backend-owned object: `id<CAMetalDrawable>` on Metal. It is **borrowed** for
+   * the frame and presented by `endFrame`, which is the same lifetime rule `beginFrame` gives the
+   * layer-owned drawable.
+   *
+   * Default: unsupported. A backend whose presentation is not driven by an external display link has
+   * no use for it, and returning Unsupported is what keeps the absent path from looking like a
+   * successful one.
+   */
+  virtual Result beginFrameWithDrawable(SwapchainHandle swapchain, void* nativeDrawable, SwapchainInfo* outInfo) {
+    (void) swapchain;
+    (void) nativeDrawable;
+    (void) outInfo;
+    return Result::Unsupported;
+  }
 
   /** Acquires a direct-render target for the current swapchain image. Default: unsupported. */
   virtual Result acquireSwapchainTarget(SwapchainHandle swapchain, SwapchainTargetHandle* outTarget,

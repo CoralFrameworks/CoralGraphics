@@ -206,6 +206,19 @@ public:
     backend::SemaphoreHandle signalSemaphore = backend::SemaphoreHandle::invalid(),
     const Rect& damage = {}, const Point& translation = {}, bool continueFrame = false);
 
+  /**
+   * Runs the colour-managed presentation pass.
+   *
+   * A full-target draw into @p target, sampling @p source: decode sRGB when the source is encoded,
+   * convert Rec.709 primaries to the destination gamut, then write PQ, extended linear or gamma-encoded
+   * P3. It is a separate, synchronous submission because it writes a different target from the frame it
+   * presents; the caller orders the two on the queue with the semaphores it passes.
+   */
+  backend::Result present(const RenderTarget& source, RenderTarget& target,
+    const PresentationParameters& parameters,
+    backend::SemaphoreHandle waitSemaphore = backend::SemaphoreHandle::invalid(),
+    backend::SemaphoreHandle signalSemaphore = backend::SemaphoreHandle::invalid());
+
   /** Enables asynchronous frame submission; the caller owns one renderer per in-flight slot. */
   void setAsyncSubmissions(bool enabled) noexcept { mAsyncSubmissions = enabled; }
 
@@ -311,6 +324,14 @@ private:
     SdfImage,
     /** `quad.vert`/`sdf_pattern.frag`: the SDF quad with a second sampler for the pattern texture. */
     SdfPattern,
+    /**
+     * `composite.vert`/`present.frag`: the colour-managed presentation pass.
+     *
+     * A full-target quad that samples the canvas or the linear 16F intermediate and writes the display
+     * encoding. It shares `composite.vert` because both passes cover the attachment and pass a texture
+     * coordinate straight through; its fragment stage is where the colour transform lives.
+     */
+    Present,
   };
 
   /**
@@ -778,6 +799,9 @@ private:
     size_t size);
   /** Makes the 1x1 texture for @p alpha current, creating and uploading it on first use. */
   backend::Result updateConstantAlphaTexture(float alpha);
+
+  /** Creates the six-vertex presentation quad and the set the presentation pass binds. */
+  backend::Result createPresentationResources();
   /** Appends a diagnostic, keeping only the last few so that a steady frame cannot grow without bound. */
   void note(backend::MessageSeverity severity, std::string message);
 
@@ -1260,6 +1284,19 @@ private:
    * is no per-draw block to allocate or range-offset.
    */
   backend::DescriptorSetHandle mPathSet = backend::DescriptorSetHandle::invalid();
+
+  /**
+   * The presentation pass's set: the source texture at 0, the white fallback at 1 and its block at 2,
+   * on `mTexturedSetLayout`.
+   *
+   * There is one because every presentation submission is executed synchronously -- `present` submits a
+   * command buffer and waits -- so a set rewritten for the next pass cannot be read by a command buffer
+   * still in flight. A backend with an asynchronous submit would need a ring here, which is why the
+   * lifetime rule is stated rather than left to the reader.
+   */
+  backend::DescriptorSetHandle mPresentSet = backend::DescriptorSetHandle::invalid();
+  /** The six-vertex full-target quad the presentation pass draws, built once. */
+  backend::BufferHandle mPresentVertexBuffer = backend::BufferHandle::invalid();
 
   /**
    * The gradient's own set layout, with binding 1 naming the canvas block and binding 2 the gradient block.

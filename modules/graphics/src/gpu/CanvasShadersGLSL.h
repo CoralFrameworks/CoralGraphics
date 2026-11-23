@@ -37,7 +37,7 @@
 
 /** The same source stamp as the committed SPIR-V copy; a stale fallback fails a test. */
 #ifndef CORAL_CANVAS_GLSL_SHADERS_SOURCE_MANIFEST
-#define CORAL_CANVAS_GLSL_SHADERS_SOURCE_MANIFEST "composite.frag:27293:1785283876;composite.vert:4371:850932064;coverage.frag:8687:3324524355;gradient.frag:17131:3906668714;image.frag:7156:2149229792;image_cubic.frag:4142:672872816;mask.frag:8545:3195844262;path.frag:5408:1305144248;path.vert:6016:1586480104;quad.frag:13907:4111692756;quad.vert:14876:1113030890;sdf.frag:4186:704651425;sdf_pattern.frag:4388:774748181"
+#define CORAL_CANVAS_GLSL_SHADERS_SOURCE_MANIFEST "composite.frag:27293:1785283876;composite.vert:4371:850932064;coverage.frag:8687:3324524355;gradient.frag:17131:3906668714;image.frag:7156:2149229792;image_cubic.frag:4142:672872816;mask.frag:8545:3195844262;path.frag:5408:1305144248;path.vert:6016:1586480104;present.frag:5141:1060897216;quad.frag:13907:4111692756;quad.vert:14876:1113030890;sdf.frag:4186:704651425;sdf_pattern.frag:4388:774748181"
 #endif
 
 namespace graphics {
@@ -1486,6 +1486,175 @@ void main()
 inline constexpr Source kSource{ backend::ShaderStage::Vertex, "path.vert", kEs, kDesktop, kBindings, kBindingCount };
 } // namespace path_vert
 
+// present.frag: 2275 ES bytes, 2219 desktop bytes.
+namespace present_frag {
+inline constexpr backend::ShaderBindingDeclaration kBindings[] = {
+  { 0, 2, backend::BindingType::UniformBuffer, 1, "PresentUniforms" },
+  { 0, 0, backend::BindingType::TextureSampler, 1, "uSource" },
+};
+inline constexpr size_t kBindingCount = sizeof(kBindings) / sizeof(kBindings[0]);
+inline constexpr const char* kEs = R"GLSL(#version 300 es
+precision mediump float;
+precision highp int;
+
+layout(std140) uniform PresentUniforms
+{
+    highp vec4 uRow0;
+    highp vec4 uRow1;
+    highp vec4 uRow2;
+    highp vec4 uParameters;
+} uPresent;
+
+uniform mediump sampler2D uSource;
+
+in highp vec2 vTexCoord;
+layout(location = 0) out highp vec4 oColor;
+
+highp vec3 srgbToLinear(highp vec3 encoded)
+{
+    return mix(encoded / vec3(12.9200000762939453125), pow((encoded + vec3(0.054999999701976776123046875)) / vec3(1.05499994754791259765625), vec3(2.400000095367431640625)), step(vec3(0.040449999272823333740234375), encoded));
+}
+
+highp vec3 pqFromNits(highp vec3 nits)
+{
+    highp vec3 l = clamp(nits / vec3(10000.0), vec3(0.0), vec3(1.0));
+    highp vec3 p = pow(l, vec3(0.1593017578125));
+    return pow((vec3(0.8359375) + (p * 18.8515625)) / (vec3(1.0) + (p * 18.6875)), vec3(78.84375));
+}
+
+highp vec3 linearToSrgb(highp vec3 linear)
+{
+    return mix(linear * 12.9200000762939453125, (pow(linear, vec3(0.4166666567325592041015625)) * 1.05499994754791259765625) - vec3(0.054999999701976776123046875), step(vec3(0.003130800090730190277099609375), linear));
+}
+
+void main()
+{
+    highp vec4 sampled = texture(uSource, vTexCoord);
+    highp vec3 linear = sampled.xyz;
+    bool _111 = sampled.w > 9.9999997473787516355514526367188e-05;
+    bool _118;
+    if (_111)
+    {
+        _118 = sampled.w < 0.99989998340606689453125;
+    }
+    else
+    {
+        _118 = _111;
+    }
+    if (_118)
+    {
+        linear /= vec3(sampled.w);
+    }
+    if (uPresent.uParameters.y > 0.5)
+    {
+        highp vec3 param = clamp(linear, vec3(0.0), vec3(1.0));
+        linear = srgbToLinear(param);
+    }
+    highp vec3 converted = vec3(dot(uPresent.uRow0.xyz, linear), dot(uPresent.uRow1.xyz, linear), dot(uPresent.uRow2.xyz, linear));
+    converted = max(converted, vec3(0.0));
+    if (uPresent.uParameters.x < 0.5)
+    {
+        highp vec3 param_1 = converted * uPresent.uParameters.z;
+        oColor = vec4(pqFromNits(param_1), 1.0);
+    }
+    else
+    {
+        if (uPresent.uParameters.x < 1.5)
+        {
+            oColor = vec4(converted, 1.0);
+        }
+        else
+        {
+            highp vec3 param_2 = clamp(converted, vec3(0.0), vec3(1.0));
+            oColor = vec4(linearToSrgb(param_2), 1.0);
+        }
+    }
+}
+
+)GLSL";
+inline constexpr const char* kDesktop = R"GLSL(#version 410
+#ifdef GL_ARB_shading_language_420pack
+#extension GL_ARB_shading_language_420pack : require
+#endif
+
+layout(std140) uniform PresentUniforms
+{
+    vec4 uRow0;
+    vec4 uRow1;
+    vec4 uRow2;
+    vec4 uParameters;
+} uPresent;
+
+ uniform sampler2D uSource;
+
+layout(location = 0) in vec2 vTexCoord;
+layout(location = 0) out vec4 oColor;
+
+vec3 srgbToLinear(vec3 encoded)
+{
+    return mix(encoded / vec3(12.9200000762939453125), pow((encoded + vec3(0.054999999701976776123046875)) / vec3(1.05499994754791259765625), vec3(2.400000095367431640625)), step(vec3(0.040449999272823333740234375), encoded));
+}
+
+vec3 pqFromNits(vec3 nits)
+{
+    vec3 l = clamp(nits / vec3(10000.0), vec3(0.0), vec3(1.0));
+    vec3 p = pow(l, vec3(0.1593017578125));
+    return pow((vec3(0.8359375) + (p * 18.8515625)) / (vec3(1.0) + (p * 18.6875)), vec3(78.84375));
+}
+
+vec3 linearToSrgb(vec3 linear)
+{
+    return mix(linear * 12.9200000762939453125, (pow(linear, vec3(0.4166666567325592041015625)) * 1.05499994754791259765625) - vec3(0.054999999701976776123046875), step(vec3(0.003130800090730190277099609375), linear));
+}
+
+void main()
+{
+    vec4 sampled = texture(uSource, vTexCoord);
+    vec3 linear = sampled.xyz;
+    bool _111 = sampled.w > 9.9999997473787516355514526367188e-05;
+    bool _118;
+    if (_111)
+    {
+        _118 = sampled.w < 0.99989998340606689453125;
+    }
+    else
+    {
+        _118 = _111;
+    }
+    if (_118)
+    {
+        linear /= vec3(sampled.w);
+    }
+    if (uPresent.uParameters.y > 0.5)
+    {
+        vec3 param = clamp(linear, vec3(0.0), vec3(1.0));
+        linear = srgbToLinear(param);
+    }
+    vec3 converted = vec3(dot(uPresent.uRow0.xyz, linear), dot(uPresent.uRow1.xyz, linear), dot(uPresent.uRow2.xyz, linear));
+    converted = max(converted, vec3(0.0));
+    if (uPresent.uParameters.x < 0.5)
+    {
+        vec3 param_1 = converted * uPresent.uParameters.z;
+        oColor = vec4(pqFromNits(param_1), 1.0);
+    }
+    else
+    {
+        if (uPresent.uParameters.x < 1.5)
+        {
+            oColor = vec4(converted, 1.0);
+        }
+        else
+        {
+            vec3 param_2 = clamp(converted, vec3(0.0), vec3(1.0));
+            oColor = vec4(linearToSrgb(param_2), 1.0);
+        }
+    }
+}
+
+)GLSL";
+inline constexpr Source kSource{ backend::ShaderStage::Fragment, "present.frag", kEs, kDesktop, kBindings, kBindingCount };
+} // namespace present_frag
+
 // quad.frag: 1459 ES bytes, 1454 desktop bytes.
 namespace quad_frag {
 inline constexpr backend::ShaderBindingDeclaration kBindings[] = {
@@ -2056,6 +2225,7 @@ inline constexpr Source kSource{ backend::ShaderStage::Fragment, "sdf_pattern.fr
   if (compare(name, "mask.frag")) return mask_frag::kSource;
   if (compare(name, "path.frag")) return path_frag::kSource;
   if (compare(name, "path.vert")) return path_vert::kSource;
+  if (compare(name, "present.frag")) return present_frag::kSource;
   if (compare(name, "quad.frag")) return quad_frag::kSource;
   if (compare(name, "quad.vert")) return quad_vert::kSource;
   if (compare(name, "sdf.frag")) return sdf_frag::kSource;
@@ -2064,7 +2234,7 @@ inline constexpr Source kSource{ backend::ShaderStage::Fragment, "sdf_pattern.fr
 }
 
 /** @return how many shaders are embedded, which a diagnostic reports. */
-[[nodiscard]] inline size_t count() noexcept { return 13; }
+[[nodiscard]] inline size_t count() noexcept { return 14; }
 
 } // namespace glsl
 } // namespace shaders

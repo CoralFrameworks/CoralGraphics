@@ -23,11 +23,56 @@
 #include <cstdint>
 #include <memory>
 #include <string>
+#include <vector>
 
 namespace graphics {
 
 class Font;
 class Path;
+
+/**
+ * One OpenType variation axis and the range it accepts.
+ *
+ * A variable font is not a family with several files: it is one file whose outlines, metrics and
+ * sometimes even glyph set are interpolated from the coordinates a caller chooses. `wght` (weight),
+ * `wdth` (width), `opsz` (optical size) and `ital` (italic) are the registered tags; a font may declare
+ * private ones. The values are in the font's own *design* units, which are also the units
+ * `FontVariation::value` uses -- so a caller can pass the numbers the font documents without learning
+ * a second, normalised coordinate system.
+ *
+ * `hidden` mirrors the `hidden` bit of the OpenType axis record: such an axis is still adjustable, but
+ * a UI should not offer it in the list a user picks from.
+ */
+struct FontVariationAxis {
+  /** The four-character OpenType axis tag, e.g. `"wght"`. */
+  std::string tag;
+  /** The axis name from the font's `name` table, or empty when it has none. */
+  std::string name;
+  float minValue = 0.0f;
+  float defaultValue = 0.0f;
+  float maxValue = 0.0f;
+  bool hidden = false;
+};
+
+/**
+ * One axis coordinate: `tag` selects the axis and `value` is its design-unit position.
+ *
+ * A vector of these is the whole of a variation request. The type is deliberately the same value a
+ * `FontNamedInstance` reports, so choosing a named instance and setting coordinates by hand are the
+ * same operation with the same validation.
+ */
+struct FontVariation {
+  std::string tag;
+  float value = 0.0f;
+};
+
+/** A pre-defined point in a variable font's design space, as the font's `fvar` table lists it. */
+struct FontNamedInstance {
+  /** The instance's name from the font's `name` table. */
+  std::string name;
+  /** The coordinates this instance names, in the same design units as `FontVariationAxis`. */
+  std::vector<FontVariation> variations;
+};
 
 /**
  * The platform's ClearType-style coverage shaping.
@@ -197,6 +242,51 @@ public:
   [[nodiscard]] bool isMonospaced() const noexcept { return mMonospaced; }
 
   /**
+   * True when the face has an `fvar` table and can be varied.
+   *
+   * A static face reports false and has no axes; asking it for variations is a caller error rather
+   * than a silent identity, which is why `withVariations` returns null in that case.
+   */
+  [[nodiscard]] bool hasVariations() const noexcept { return !mVariationAxes.empty(); }
+
+  /** The axes this face declares, in the font's own order. Empty for a static face. */
+  [[nodiscard]] const std::vector<FontVariationAxis>& variationAxes() const noexcept {
+    return mVariationAxes;
+  }
+
+  /** The named instances the face declares. Empty for a static face or one without named instances. */
+  [[nodiscard]] const std::vector<FontNamedInstance>& namedInstances() const noexcept {
+    return mNamedInstances;
+  }
+
+  /**
+   * The face's current design-space position, one entry per axis.
+   *
+   * The default position for a face that has never been varied; the coordinates the font was cloned
+   * at for a face `withVariations` produced. Empty for a static face.
+   */
+  [[nodiscard]] const std::vector<FontVariation>& variations() const noexcept { return mVariations; }
+
+  /**
+   * @return a new face from the same file at @p variations, or null when the request is invalid.
+   *
+   * ## Why this returns a new face instead of changing this one
+   *
+   * A FreeType face has one mutable design position and one glyph slot, which is exactly the state two
+   * `Font`s sharing a `Typeface` would fight over. Cloning the face is what lets a UI animate a weight
+   * axis on one text run while another run keeps the default; the file's bytes are shared through the
+   * same owner, so the cost is a face object rather than a copy of the font.
+   *
+   * Axes not named in @p variations keep their current value, so `withVariations({{"wght", 700}})` on
+   * a face already at `opsz` 12 preserves the optical size. Unknown tags, a tag that is not four
+   * characters, and values outside the axis's range are refused: FreeType would clamp the last one, and
+   * a silent clamp is the kind of "it worked" that hides a layout that asked for the wrong axis. The
+   * error, when @p error is non-null, names the offending tag.
+   */
+  [[nodiscard]] std::shared_ptr<Typeface> withVariations(const std::vector<FontVariation>& variations,
+          std::string* error = nullptr) const;
+
+  /**
    * The units one em is divided into, as the font's own tables state it.
    *
    * Fonts state their metrics in integer units of an em -- typically 1000 for a PostScript-flavoured
@@ -310,6 +400,13 @@ private:
   uint32_t mUnitsPerEm = 0;
   bool mScalable = false;
   bool mMonospaced = false;
+
+  /** The face's `fvar` axes, empty for a static face. */
+  std::vector<FontVariationAxis> mVariationAxes;
+  /** The face's named instances, as its `fvar`/`name` tables state them. */
+  std::vector<FontNamedInstance> mNamedInstances;
+  /** The design position this face was created or cloned at, one entry per axis. */
+  std::vector<FontVariation> mVariations;
 
   /**
    * The FreeType and harfbuzz objects, hidden here rather than in the header.

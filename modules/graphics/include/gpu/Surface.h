@@ -97,10 +97,10 @@ struct SurfaceConfiguration {
    * Write PQ-encoded numbers (HDR10) instead of sRGB-encoded ones.
    *
    * The canvas still records sRGB-encoded colours; this flag makes the output stage apply the BT.2408
-   * white point (203 cd/m^2) and the PQ curve on the way into the target. It exists separately from
-   * the swapchain's colour space because an 8-bit target with PQ numbers is the one way to test the
-   * output stage without an HDR display: the encoded byte is the same number a 10-bit swapchain
-   * carries, only at a coarser precision.
+   * white point (203 cd/m^2) and the PQ curve on the way into the target. It is the **offscreen** test
+   * path: a window uses `WindowSurface::Configuration::outputColorSpace` and the linear 16F presentation
+   * pass instead, because an 8-bit target cannot carry values above diffuse white. Here the encoded byte
+   * is the same number a 10-bit swapchain carries, only at a coarser precision.
    */
   bool pqOutput = false;
 

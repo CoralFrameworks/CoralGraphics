@@ -155,13 +155,37 @@ class WindowSurface final {
     backend::PresentMode presentMode = backend::PresentMode::Fifo;
 
     /**
-     * Present the canvas in PQ (HDR10) instead of sRGB.
+     * The colour space the window presents in.
      *
-     * The canvas still draws sRGB-encoded colours; the presentation pass converts them with the BT.2408
-     * white point (203 cd/m^2) into a 10-bit PQ swapchain. When the surface offers no HDR10 format the
-     * window falls back to sRGB and says so in `diagnostics()` -- refusing to open would be worse than a
-     * correct SDR picture. `CORAL_HDR_OUTPUT=1` in the environment sets this, which is how a demo can
-     * try it without a new API knob.
+     * `Srgb` is the SDR default and the only one the OpenGL backend can honour. `DisplayP3` is
+     * wide-gamut SDR, `ExtendedLinearP3` is a 16-bit float EDR surface whose values above 1.0 carry
+     * highlight headroom, and `Hdr10Pq` is PQ-encoded HDR10. The backend may grant `Srgb` to a request
+     * it cannot honour; `displayColorSpace()` reports what was granted and `diagnostics()` says why.
+     *
+     * Every non-SRGB space goes through the linear 16F presentation pass: the canvas still records
+     * 8-bit sRGB, that pass decodes it to linear Display P3 in a floating-point target, and a second
+     * pass writes the display encoding (PQ, extended linear or gamma-encoded P3). The intermediate is
+     * where values above diffuse white can exist without banding; doing the transform in the 8-bit
+     * canvas would clip them before the window saw them.
+     */
+    backend::SwapchainColorSpace outputColorSpace = backend::SwapchainColorSpace::Srgb;
+
+    /**
+     * Diffuse white for the HDR/EDR presentation, in cd/m^2 (nits).
+     *
+     * BT.2408 puts SDR reference white at 203 cd/m^2 in an HDR container. The presentation pass maps
+     * canvas white to this value and PQ-encodes it against PQ's 10000 cd/m^2 range, so changing this
+     * number moves the whole picture within the HDR signal rather than changing its contrast.
+     */
+    float sdrWhiteNits = 203.0f;
+
+    /**
+     * Shorthand for `outputColorSpace = Hdr10Pq`.
+     *
+     * Kept for the demos and for a caller written before `outputColorSpace` existed. When it is true and
+     * `outputColorSpace` is still `Srgb`, the window requests PQ; an explicit `outputColorSpace`
+     * always wins. `CORAL_HDR_OUTPUT=1` in the environment sets this, which is how a demo can try it
+     * without a new API knob.
      */
     bool hdrOutput = false;
 
@@ -250,12 +274,13 @@ class WindowSurface final {
   [[nodiscard]] backend::PresentMode presentMode() const noexcept;
 
   /**
-   * The colour space the swapchain presents in.
+   * The colour space the swapchain **actually** presents in.
    *
-   * The canvas draws sRGB-encoded values into a UNORM target, so this is `Srgb` today; the surface's
-   * wide-gamut/HDR support is reported separately by
-   * `Device::getCapabilities().displayP3Swapchain`/`hdr10Swapchain`, which is what an HDR output stage
-   * would negotiate against.
+   * This may be `Srgb` even when `Configuration::outputColorSpace` asked for another space: a backend or
+   * display that cannot grant the request falls back rather than refusing to open, and
+   * `diagnostics()` names the fallback. The canvas itself always draws sRGB-encoded values; for a
+   * non-SRGB result the window runs the linear 16F presentation pass and writes the encoding this
+   * space expects.
    */
   [[nodiscard]] backend::SwapchainColorSpace displayColorSpace() const noexcept;
 
@@ -274,6 +299,27 @@ class WindowSurface final {
    *         device); `diagnostics()` then names the reason.
    */
   [[nodiscard]] graphics::Canvas* beginFrame();
+
+  /**
+   * Opens a frame on a drawable a display link already handed out.
+   *
+   * ## Why this exists next to `beginFrame`
+   *
+   * `CAMetalDisplayLink` owns the display timing: its delegate receives a `CAMetalDrawable` together
+   * with the target presentation timestamp, and the delegate is expected to render into **that**
+   * drawable. Calling `beginFrame()` there would ask the layer for a second drawable, which either
+   * blocks until the first is presented or presents two images for one tick. This overload makes the
+   * display link's drawable the frame's target instead.
+   *
+   * @param nativeDrawable the display link's `id<CAMetalDrawable>`. Borrowed: `present()` presents it,
+   *        and the display link recycles it afterwards. Only the Metal backend implements this; another
+   *        backend returns null with `diagnostics()` naming the reason.
+   *
+   * The call is thread-affine in the same way `beginFrame` is: call it on the thread that owns this
+   * surface, which for a display-link-driven loop is the display link's own thread. See
+   * `gpu::MetalDisplayLink`.
+   */
+  [[nodiscard]] graphics::Canvas* beginFrame(void* nativeDrawable);
 
   /**
    * Draws a texture another producer owns, between the canvas's own draws.
@@ -397,6 +443,9 @@ class WindowSurface final {
 
  private:
   WindowSurface();
+
+  /** The shared body of the two `beginFrame` overloads; a null drawable acquires one from the swapchain. */
+  graphics::Canvas* beginFrameImpl(void* nativeDrawable);
 
   bool presentRecordingImpl(const DrawList& list, const Rect* damage = nullptr);
 

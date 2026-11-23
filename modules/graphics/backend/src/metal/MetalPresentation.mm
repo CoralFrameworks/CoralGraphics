@@ -18,6 +18,8 @@
 
 #include <TargetConditionals.h>
 
+#import <CoreGraphics/CoreGraphics.h>
+
 #include <algorithm>
 #include <string>
 
@@ -117,16 +119,39 @@ Result MetalDevice::createSwapchain(const SwapchainDescriptor& descriptor, Swapc
     return Result::InvalidArgument;
   }
 
-  // The drawable's format is the layer's. See `kPresentFormat`.
-  swapchain.format = kPresentFormat;
-  if (mIos && descriptor.presentMode != PresentMode::Fifo) {
+  // ## The colour space chooses the drawable format
+  //
+  // `Srgb` and `DisplayP3` are 8-bit BGRA drawables. EDR is RGBA16Float so that values above 1.0
+  // survive, and HDR10 is a 10-bit RGB drawable. `CAMetalLayer` takes the format and the colour space
+  // separately; the presentation pass in the graphics layer writes the encoding the granted space
+  // expects, so this side only has to configure the surface honestly.
+  switch (descriptor.colorSpace) {
+    case SwapchainColorSpace::Srgb:
+      swapchain.format = kPresentFormat;
+      swapchain.colorSpace = SwapchainColorSpace::Srgb;
+      break;
+    case SwapchainColorSpace::DisplayP3:
+      swapchain.format = kPresentFormat;
+      swapchain.colorSpace = SwapchainColorSpace::DisplayP3;
+      break;
+    case SwapchainColorSpace::ExtendedLinearP3:
+      swapchain.format = PixelFormat::R16G16B16A16_SFLOAT;
+      swapchain.colorSpace = SwapchainColorSpace::ExtendedLinearP3;
+      break;
+    case SwapchainColorSpace::Hdr10Pq:
+      swapchain.format = PixelFormat::R10G10B10A2_UNORM;
+      swapchain.colorSpace = SwapchainColorSpace::Hdr10Pq;
+      break;
+  }
+  if (mIos) {
     // iOS has no swap-interval or display-sync control: the compositor presents the drawable at the display's refresh
     // rate. Reporting the granted mode honestly is what lets a caller that wanted Immediate know it did not get it.
     swapchain.presentMode = PresentMode::Fifo;
+  } else {
+    swapchain.presentMode = descriptor.presentMode;
   }
   swapchain.mtlFormat = toMtlPixelFormat(swapchain.format);
   swapchain.srgb = false;
-  swapchain.presentMode = descriptor.presentMode;
   swapchain.imageCount = descriptor.imageCount != 0 ? std::max(2u, descriptor.imageCount)
                                                     : (descriptor.presentMode == PresentMode::Mailbox ? 3u : 2u);
 
@@ -137,7 +162,11 @@ Result MetalDevice::createSwapchain(const SwapchainDescriptor& descriptor, Swapc
   // framebuffer-only layer forbids both, and the flag costs nothing on Apple GPUs.
   layer.framebufferOnly = NO;
   layer.drawableSize = CGSizeMake(swapchain.width, swapchain.height);
-  layer.maximumDrawableCount = swapchain.imageCount;
+  // `maximumDrawableCount` is deliberately not set: CAMetalLayer refuses it outright once a
+  // CAMetalDisplayLink owns the layer's drawable pool ("should not be called when using
+  // CAMetalDisplayLink"), and the default pool of three is the number the RHI already asks for in
+  // mailbox mode. The requested image count is still reported in `SwapchainInfo` for callers that
+  // size their own in-flight budget from it.
 #if !TARGET_OS_IPHONE
   // `displaySyncEnabled` is a macOS-only property. On iOS a CAMetalLayer presents in step with the display and offers
   // no per-layer control, so the requested mode is granted as Fifo below rather than pretended.
@@ -147,14 +176,45 @@ Result MetalDevice::createSwapchain(const SwapchainDescriptor& descriptor, Swapc
   layer.opaque = YES;
   if (descriptor.label != nullptr) layer.name = [NSString stringWithUTF8String:descriptor.label];
 
-  // The RHI's colour-space request. CAMetalLayer can present a PQ/EDR surface, but the presentation pass that would
-  // encode PQ is the graphics layer's (`SurfaceConfiguration::pqOutput`) and no Metal path drives it yet; reporting the
-  // SDR grant is what stops the caller encoding PQ numbers into an sRGB-presented surface.
-  if (descriptor.colorSpace != SwapchainColorSpace::Srgb) {
-    emitMessage(MessageSeverity::Warning,
-            "this Metal backend presents SDR sRGB; the requested HDR colour space is not implemented and the swapchain "
-            "was granted Srgb");
+  // The colour space object is what tells the window server how to interpret the drawable's numbers.
+  // `ExtendedLinearP3` additionally asks for EDR; the others leave the flag off, because an SDR
+  // surface with EDR enabled would let the compositor apply a display transform the content never
+  // described.
+  CGColorSpaceRef colorSpace = nullptr;
+  bool extendedRange = false;
+  switch (swapchain.colorSpace) {
+    case SwapchainColorSpace::Srgb:
+      colorSpace = CGColorSpaceCreateWithName(kCGColorSpaceSRGB);
+      break;
+    case SwapchainColorSpace::DisplayP3:
+      colorSpace = CGColorSpaceCreateWithName(kCGColorSpaceDisplayP3);
+      break;
+    case SwapchainColorSpace::ExtendedLinearP3:
+      colorSpace = CGColorSpaceCreateWithName(kCGColorSpaceExtendedLinearDisplayP3);
+      extendedRange = true;
+      break;
+    case SwapchainColorSpace::Hdr10Pq:
+      colorSpace = CGColorSpaceCreateWithName(kCGColorSpaceITUR_2100_PQ);
+      extendedRange = true;
+      break;
   }
+  if (colorSpace == nullptr) {
+    // A system without the requested space falls back to SDR rather than presenting numbers the
+    // compositor would misread. The caller sees the granted space and the warning.
+    emitMessage(MessageSeverity::Warning,
+            "the requested Metal colour space is unavailable on this system; the swapchain was granted Srgb");
+    swapchain.format = kPresentFormat;
+    swapchain.mtlFormat = toMtlPixelFormat(swapchain.format);
+    swapchain.colorSpace = SwapchainColorSpace::Srgb;
+    colorSpace = CGColorSpaceCreateWithName(kCGColorSpaceSRGB);
+    extendedRange = false;
+    layer.pixelFormat = swapchain.mtlFormat;
+  }
+  if (colorSpace != nullptr) {
+    layer.colorspace = colorSpace;
+    CGColorSpaceRelease(colorSpace);
+  }
+  layer.wantsExtendedDynamicRangeContent = extendedRange;
 
   *outSwapchain = mSwapchains.allocate(std::move(swapchain));
   return outSwapchain->valid() ? Result::Success : Result::OutOfMemory;
@@ -187,7 +247,7 @@ Result MetalDevice::getSwapchainInfo(const SwapchainHandle swapchainHandle, Swap
   info.currentImage = TextureHandle::invalid();
   info.currentRenderPass = RenderPassHandle::invalid();
   info.srgb = swapchain->srgb;
-  info.colorSpace = SwapchainColorSpace::Srgb;
+  info.colorSpace = swapchain->colorSpace;
   *outInfo = info;
   return Result::Success;
 }
@@ -241,7 +301,59 @@ Result MetalDevice::beginFrame(const SwapchainHandle swapchainHandle, SwapchainI
     info.currentImage = TextureHandle::invalid();
     info.currentRenderPass = RenderPassHandle::invalid();
     info.srgb = swapchain->srgb;
-    info.colorSpace = SwapchainColorSpace::Srgb;
+    info.colorSpace = swapchain->colorSpace;
+    *outInfo = info;
+  }
+  return Result::Success;
+}
+
+Result MetalDevice::beginFrameWithDrawable(const SwapchainHandle swapchainHandle, void* nativeDrawable,
+        SwapchainInfo* outInfo) {
+  MetalSwapchain* swapchain = mSwapchains.get(swapchainHandle);
+  if (swapchain == nullptr) return Result::InvalidHandle;
+  if (swapchain->frameAcquired) {
+    emitMessage(MessageSeverity::Error, "beginFrameWithDrawable was called while a frame is already acquired");
+    return Result::InvalidArgument;
+  }
+  if (nativeDrawable == nullptr) {
+    emitMessage(MessageSeverity::Error, "beginFrameWithDrawable needs an id<CAMetalDrawable>");
+    return Result::InvalidArgument;
+  }
+  id<CAMetalDrawable> drawable = (__bridge id<CAMetalDrawable>)nativeDrawable;
+  if (drawable == nil || drawable.texture == nil) {
+    emitMessage(MessageSeverity::Error, "the display link's drawable has no texture");
+    return Result::InvalidArgument;
+  }
+  if (drawable.texture.pixelFormat != swapchain->mtlFormat) {
+    // The drawable comes from the same layer, so this should agree; a mismatch means the layer was
+    // reconfigured behind the swapchain's back. Refusing is better than rendering into a format the
+    // window pipelines were not built for.
+    emitMessage(MessageSeverity::Error,
+            "the display link's drawable format does not match the swapchain's; the layer was reconfigured");
+    return Result::InvalidArgument;
+  }
+
+  swapchain->drawable = drawable;
+  swapchain->frameAcquired = true;
+  swapchain->outOfDate = false;
+  swapchain->width = static_cast<uint32_t>(drawable.texture.width);
+  swapchain->height = static_cast<uint32_t>(drawable.texture.height);
+  mCurrentFrameSwapchain = swapchain;
+
+  // There is no acquire command to wait on: the display link already owns the drawable. The caller's
+  // render submission therefore has no acquire semaphore, which is why this overload takes none.
+  if (outInfo != nullptr) {
+    SwapchainInfo info;
+    info.width = swapchain->width;
+    info.height = swapchain->height;
+    info.format = swapchain->format;
+    info.imageCount = swapchain->imageCount;
+    info.presentMode = swapchain->presentMode;
+    info.currentImageIndex = 0;
+    info.currentImage = TextureHandle::invalid();
+    info.currentRenderPass = RenderPassHandle::invalid();
+    info.srgb = swapchain->srgb;
+    info.colorSpace = swapchain->colorSpace;
     *outInfo = info;
   }
   return Result::Success;

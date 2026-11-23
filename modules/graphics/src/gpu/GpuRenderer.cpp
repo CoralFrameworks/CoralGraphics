@@ -254,6 +254,37 @@ CanvasUniforms canvasUniformsFor(const RenderTarget& target) {
   return canvas;
 }
 
+/**
+ * `present.frag`'s `PresentUniforms`.
+ *
+ * The matrix is three `vec4` rows rather than a `mat3`: std140 pads a mat3 column to 16 bytes, and a
+ * C++ `float[3][3]` would be 36 bytes against the block's 48. Stating the rows is the same choice
+ * `CanvasUniforms` makes about its padding, and for the same reason -- a block that is *almost* the
+ * right shape reads the wrong bytes and reports no error.
+ */
+struct PresentUniforms {
+  float row0[4];
+  float row1[4];
+  float row2[4];
+  /** `x` mode (0 PQ, 1 extended linear, 2 gamma), `y` source-encoded, `z` SDR white nits. */
+  float parameters[4];
+};
+static_assert(sizeof(PresentUniforms) == 64, "present.frag's block must stay 64 bytes");
+
+/** The Rec.709 primaries' linear conversion to Display P3, row by row. */
+constexpr float kRec709ToP3[3][3] = {
+  { 0.822592f, 0.177561f, 0.000000f },
+  { 0.033199f, 0.966814f, 0.000000f },
+  { 0.017085f, 0.072397f, 0.910532f },
+};
+
+/** The Rec.709 primaries' linear conversion to BT.2020, row by row. */
+constexpr float kRec709ToBt2020[3][3] = {
+  { 0.627404f, 0.329282f, 0.043314f },
+  { 0.069097f, 0.919540f, 0.011363f },
+  { 0.016392f, 0.088013f, 0.895595f },
+};
+
 /** `composite.frag`'s `CompositeUniforms`. */
 struct CompositeUniforms {
   float alpha;
@@ -1076,7 +1107,8 @@ backend::Result GpuRenderer::initialize(backend::Device* borrowedDevice, const b
   // symptom would be a canvas that draws rectangles and nothing else.
   mEmbeddedShaderCount = shaderCount(mDevice);
   const char* const required[] = { "quad.vert", "quad.frag", "path.vert", "path.frag",
-                                   "composite.vert", "composite.frag", "mask.frag", "coverage.frag" };
+                                   "composite.vert", "composite.frag", "mask.frag", "coverage.frag",
+                                   "present.frag" };
   std::string missing;
   for (const char* name: required) {
     if (!findShader(mDevice, name).isValid()) {
@@ -1122,6 +1154,10 @@ backend::Result GpuRenderer::initialize(backend::Device* borrowedDevice, const b
     return result;
   }
   result = createFallbackTextures();
+  if (!backend::isSuccess(result)) {
+    return result;
+  }
+  result = createPresentationResources();
   if (!backend::isSuccess(result)) {
     return result;
   }
@@ -1437,6 +1473,48 @@ backend::Result GpuRenderer::createFallbackTextures() {
   // supplies one set per composite position, and each program writes all three bindings on every use, including its own
   // uniform block at binding 2.
   return backend::Result::Success;
+}
+
+backend::Result GpuRenderer::createPresentationResources() {
+  // The quad is written once. Clip space and the texture coordinate are enough: the fragment stage is
+  // where every colour decision lives, so the geometry never changes.
+  //
+  // The V coordinate follows the same rule as `composite.vert`'s quads: an OpenGL-rendered target stores
+  // its first row at texture row 0 while the device image's row 0 is the top, so sampling it without the
+  // flip presents every frame upside down. Vulkan's targets are already top-down.
+  const bool topDown = usesVulkanShaderSet(mDevice);
+  const float v0 = topDown ? 0.0f : 1.0f;
+  const float v1 = topDown ? 1.0f : 0.0f;
+  const FullTargetVertex quad[kCoverVertexCount] = {
+    { -1.0f, -1.0f, 0.0f, v0 }, { 1.0f, -1.0f, 1.0f, v0 }, { 1.0f, 1.0f, 1.0f, v1 },
+    { -1.0f, -1.0f, 0.0f, v0 }, { 1.0f, 1.0f, 1.0f, v1 }, { -1.0f, 1.0f, 0.0f, v1 },
+  };
+
+  const backend::BufferDescriptor descriptor{
+    .size = sizeof(quad),
+    .usage = static_cast<backend::BufferUsages>(backend::BufferUsage::Vertex),
+    .memoryUsage = backend::MemoryUsage::CpuToGpuDynamic,
+    .initialData = nullptr,
+    .label = "canvas/present-vertices",
+  };
+  backend::Result result = mDevice->createBuffer(descriptor, &mPresentVertexBuffer);
+  if (!backend::isSuccess(result)) return result;
+  result = uploadBuffer(mPresentVertexBuffer, sizeof(quad), 0, quad, sizeof(quad));
+  if (!backend::isSuccess(result)) return result;
+
+  result = mDevice->createDescriptorSet(mTexturedSetLayout, &mPresentSet);
+  if (!backend::isSuccess(result)) return result;
+
+  // Bind every binding up front, including the uniform block at slot 0, so the set is complete before
+  // the first presentation. `present` rewrites the block and the source texture per submission.
+  const backend::DescriptorWrite writes[] = {
+    { 0, backend::BindingType::TextureSampler, mWhiteTexture, mLinearClamp, {}, 0 },
+    { 1, backend::BindingType::TextureSampler, mWhiteTexture, mLinearClamp, {}, 0 },
+    { 2, backend::BindingType::UniformBuffer, backend::TextureHandle::invalid(),
+      backend::TextureSamplerHandle::invalid(),
+      { uniformBuffer(), 0, kUniformSlotSize }, 0 },
+  };
+  return mDevice->updateDescriptorSet(mPresentSet, writes, 3);
 }
 
 backend::Result GpuRenderer::allocateUniformSlot(const void* const data, const size_t size, uint32_t* const outSlot) {
@@ -3931,6 +4009,7 @@ void GpuRenderer::destroyResources() noexcept {
   destroySet(mQuadSet);
   destroySet(mPathSet);
   destroySet(mCoverageFieldSet);
+  destroySet(mPresentSet);
   // The gradient's per-slot sets outlive a frame for the same reason the composite pool does: their count follows the
   // largest frame's draw count, and a frame of the same shape reuses every one of them.
   for (backend::DescriptorSetHandle& set: mGradientSlotSets) {
@@ -3960,6 +4039,7 @@ void GpuRenderer::destroyResources() noexcept {
     if (buffer.valid()) mDevice->destroyBuffer(buffer);
     buffer = backend::BufferHandle::invalid();
   };
+  destroyBuffer(mPresentVertexBuffer);
   for (UniformBuffer& buffer: mUniformBuffers) {
     if (buffer.handle.valid()) mDevice->destroyBuffer(buffer.handle);
   }
@@ -4387,6 +4467,11 @@ backend::Result GpuRenderer::createPipeline(const PipelineKey& key, const backen
       fragmentName = "coverage.frag";
       layout = mCoverageFieldPipelineLayout;
       break;
+    case Program::Present:
+      vertexName = "composite.vert";
+      fragmentName = "present.frag";
+      layout = mTexturedPipelineLayout;
+      break;
   }
 
   const CanvasShader vertexShader = findShader(mDevice, vertexName);
@@ -4514,7 +4599,8 @@ backend::Result GpuRenderer::createPipeline(const PipelineKey& key, const backen
       break;
     }
     case Program::Composite:
-    case Program::Mask: {
+    case Program::Mask:
+    case Program::Present: {
       descriptor.vertexInput.bufferCount = 1;
       descriptor.vertexInput.buffers[0] = { kFullTargetVertexStride, backend::VertexStepMode::Vertex, 0, 2 };
       descriptor.vertexInput.attributeCount = 2;
@@ -4543,7 +4629,7 @@ backend::Result GpuRenderer::createPipeline(const PipelineKey& key, const backen
   descriptor.colorTargets[0].writeMask = key.writeMask;
   switch (key.variant) {
     case Variant::Plain:
-      if (key.program == Program::Composite) {
+      if (key.program == Program::Composite || key.program == Program::Present) {
         descriptor.colorTargets[0].blend = backend::BlendState::opaque();
       } else if (key.program == Program::Mask) {
         descriptor.colorTargets[0].blend =
@@ -4655,6 +4741,9 @@ backend::Result GpuRenderer::createPipeline(const PipelineKey& key, const backen
       break;
     case Program::Mask:
       descriptor.label = "canvas/mask";
+      break;
+    case Program::Present:
+      descriptor.label = "canvas/present";
       break;
     case Program::Gradient: {
       descriptor.label = "canvas/gradient";
@@ -7179,6 +7268,134 @@ backend::Result GpuRenderer::submit(const DrawList& list, RenderTarget& target, 
     note(backend::MessageSeverity::Error, "the canvas frame could not be recorded or executed");
   }
   return result;
+}
+
+backend::Result GpuRenderer::present(const RenderTarget& source, RenderTarget& target,
+    const PresentationParameters& parameters, const backend::SemaphoreHandle waitSemaphore,
+    const backend::SemaphoreHandle signalSemaphore) {
+  if (!mReady || mDevice == nullptr) return backend::Result::Unsupported;
+  if (!source.isValid() || !target.isValid() || source.colorView == backend::defaultFramebufferView()) {
+    return backend::Result::InvalidArgument;
+  }
+  if (mFrameOpen) {
+    note(backend::MessageSeverity::Error, "a presentation pass was requested inside an open canvas frame");
+    return backend::Result::InvalidArgument;
+  }
+  if (mFrameInFlight) {
+    if (const backend::Result waited = waitForFrame(); !backend::isSuccess(waited)) return waited;
+  }
+  if (mUniformBuffers.empty()) {
+    note(backend::MessageSeverity::Error, "the presentation pass has no uniform buffer");
+    return backend::Result::Error;
+  }
+
+  PresentUniforms uniforms {};
+  const bool extended = parameters.outputColorSpace == backend::SwapchainColorSpace::ExtendedLinearP3;
+  const bool pq = parameters.outputColorSpace == backend::SwapchainColorSpace::Hdr10Pq;
+  const bool displayP3 = parameters.outputColorSpace == backend::SwapchainColorSpace::DisplayP3;
+  if (!parameters.sourceIsLinear) {
+    // The source is the canvas's sRGB-encoded Rec.709 target. A linear P3 intermediate keeps the wide
+    // gamut through the float target; the PQ path needs BT.2020 instead because a PQ signal is defined
+    // over those primaries.
+    const float (*matrix)[3] = pq ? kRec709ToBt2020 : kRec709ToP3;
+    // The rows are written explicitly rather than through a pointer cast: the struct is three
+    // vec4s and a loop over a float(*)[3] would stop one element short of each row's padding.
+    uniforms.row0[0] = matrix[0][0];
+    uniforms.row0[1] = matrix[0][1];
+    uniforms.row0[2] = matrix[0][2];
+    uniforms.row0[3] = 0.0f;
+    uniforms.row1[0] = matrix[1][0];
+    uniforms.row1[1] = matrix[1][1];
+    uniforms.row1[2] = matrix[1][2];
+    uniforms.row1[3] = 0.0f;
+    uniforms.row2[0] = matrix[2][0];
+    uniforms.row2[1] = matrix[2][1];
+    uniforms.row2[2] = matrix[2][2];
+    uniforms.row2[3] = 0.0f;
+    uniforms.parameters[1] = 1.0f;
+  } else {
+    // The intermediate is already linear Display P3; only the encoding changes.
+    uniforms.row0[0] = 1.0f;
+    uniforms.row1[1] = 1.0f;
+    uniforms.row2[2] = 1.0f;
+    uniforms.parameters[1] = 0.0f;
+  }
+  uniforms.parameters[0] = pq ? 0.0f : (extended ? 1.0f : 2.0f);
+  uniforms.parameters[2] = parameters.sdrWhiteNits > 0.0f ? parameters.sdrWhiteNits : 203.0f;
+  uniforms.parameters[3] = displayP3 ? 1.0f : 0.0f;
+
+  backend::Result result = ensureCommandBuffer();
+  if (!backend::isSuccess(result)) return result;
+  result = mCommandBuffer->reset();
+  if (!backend::isSuccess(result)) return result;
+  result = mCommandBuffer->begin();
+  if (!backend::isSuccess(result)) return result;
+
+  // Slot 0 is the canvas block in a frame; a presentation submission uses it for its own block because
+  // the submission is synchronous (the queue waits), so no earlier command buffer can still read it.
+  result = uploadBuffer(mUniformBuffers.back().handle, mUniformBuffers.back().bytes, 0, &uniforms,
+          sizeof(uniforms));
+  if (!backend::isSuccess(result)) return result;
+
+  const backend::DescriptorWrite writes[] = {
+    { 0, backend::BindingType::TextureSampler, source.color, mLinearClamp, {}, 0 },
+    { 1, backend::BindingType::TextureSampler, mWhiteTexture, mLinearClamp, {}, 0 },
+    { 2, backend::BindingType::UniformBuffer, backend::TextureHandle::invalid(),
+      backend::TextureSamplerHandle::invalid(),
+      { mUniformBuffers.back().handle, 0, kUniformSlotSize }, 0 },
+  };
+  result = mDevice->updateDescriptorSet(mPresentSet, writes, 3);
+  if (!backend::isSuccess(result)) return result;
+
+  backend::RenderPassBeginInfo info;
+  info.renderPass = target.pass;
+  info.colorAttachmentCount = 1;
+  const bool multisampled = target.msaaColorView.valid();
+  info.colorAttachments[0].view = multisampled ? target.msaaColorView : target.colorView;
+  if (multisampled) info.colorAttachments[0].resolveTarget = target.colorView;
+  info.colorAttachments[0].loadOp = backend::LoadOp::Clear;
+  info.colorAttachments[0].storeOp = backend::StoreOp::Store;
+  info.colorAttachments[0].clearColor = backend::Color::transparentBlack();
+  info.renderArea = { target.width, target.height };
+  result = mCommandBuffer->beginRenderPass(info);
+  if (!backend::isSuccess(result)) return result;
+  // A full-target pass names its own viewport and scissor. Relying on the defaults would work on a fresh
+  // command buffer and silently inherit whatever scissor the last canvas batch set on a reused one.
+  backend::Viewport viewport;
+  viewport.width = static_cast<float>(target.width);
+  viewport.height = static_cast<float>(target.height);
+  result = mCommandBuffer->setViewport(viewport);
+  if (!backend::isSuccess(result)) return result;
+  result = mCommandBuffer->setScissor({ 0, 0, target.width, target.height });
+  if (!backend::isSuccess(result)) return result;
+
+  const backend::PixelFormat depthFormat = backend::PixelFormat::Undefined;
+  const PipelineKey key { Program::Present, Variant::Plain, kNoBlendMode, target.format, depthFormat,
+    target.sampleCount };
+  backend::RenderPipelineHandle pipeline = backend::RenderPipelineHandle::invalid();
+  result = ensurePipeline(key, target.pass, &pipeline);
+  if (!backend::isSuccess(result)) return result;
+  result = mCommandBuffer->bindRenderPipeline(pipeline);
+  if (!backend::isSuccess(result)) return result;
+  result = mCommandBuffer->bindDescriptorSet(0, mPresentSet);
+  if (!backend::isSuccess(result)) return result;
+  result = mCommandBuffer->setVertexBuffer(0, mPresentVertexBuffer, 0);
+  if (!backend::isSuccess(result)) return result;
+  result = mCommandBuffer->draw(kCoverVertexCount, 1, 0, 0);
+  if (!backend::isSuccess(result)) return result;
+  result = mCommandBuffer->endRenderPass();
+  if (!backend::isSuccess(result)) return result;
+  result = mCommandBuffer->end();
+  if (!backend::isSuccess(result)) return result;
+
+  backend::Queue* queue = mDevice->getQueue(backend::QueueType::Graphics);
+  if (queue == nullptr) return backend::Result::Unsupported;
+  result = queue->submit(*mCommandBuffer, backend::FenceHandle::invalid(), waitSemaphore, signalSemaphore);
+  if (!backend::isSuccess(result)) {
+    note(backend::MessageSeverity::Error, "the presentation pass could not be submitted");
+    return result;
+  }
+  return backend::Result::Success;
 }
 
 backend::Result GpuRenderer::reportOmissions(const DrawList& list) {

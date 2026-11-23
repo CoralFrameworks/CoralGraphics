@@ -134,6 +134,49 @@ adds the application's signing settings; the simulator is what the commands abov
 because its software ES renderer does not reproduce the filter/image-heavy SVG corpus pixel for pixel;
 the individual SVG tests still run there.
 
+## CoralUI adaptation
+
+Three seams connect the framework to a UI layer: the colour pipeline that reaches a wide-gamut/HDR display, the display
+tick that drives frames, and the text APIs a font picker needs.
+
+### Colour-managed presentation
+
+`WindowSurface::Configuration::outputColorSpace` asks for `Srgb`, `DisplayP3`, `ExtendedLinearP3` or `Hdr10Pq`. Any
+space other than `Srgb` goes through a **linear 16F presentation pass**:
+
+```
+canvas (RGBA8, sRGB) -> RGBA16F linear Display P3 -> display encoding (PQ / extended linear / P3 gamma)
+```
+
+The first pass decodes the canvas, converts Rec.709 primaries to the output gamut and writes float values; the second
+writes the swapchain encoding. The intermediate is where values above diffuse white can exist without banding, so an
+EDR surface or a PQ signal keeps its headroom. `sdrWhiteNits` (203 by default, BT.2408) sets diffuse white in the HDR
+signal. `displayColorSpace()` reports what the backend granted, and `diagnostics()` says why a request fell back.
+
+The Metal backend configures the `CAMetalLayer` for each space (`CGColorSpace` plus
+`wantsExtendedDynamicRangeContent`, and an RGBA16Float drawable for EDR); Vulkan negotiates the corresponding surface
+pairs; OpenGL grants `Srgb` and reports the fallback.
+
+### Display timing and threads
+
+On Apple platforms the display tick is `CADisplayLink` (`FrameClockApple.mm`), on its own run-loop thread, and
+`gpu::MetalDisplayLink` wraps `CAMetalDisplayLink`. A display-link-driven render loop creates the `WindowSurface` on
+that thread, calls `beginFrame(update.drawable)` with the drawable the link supplied, records, and calls `present()`.
+`beginFrame(void*)` is the `Device::beginFrameWithDrawable` path, so no second `nextDrawable` is acquired. The UI
+thread records `DrawList`s and hands them over with `WindowSurface::presentRecording`, which is the existing
+record/render split.
+
+`VBlankSource` remains the polled abstraction for platforms without a display link; on Apple it now reports the
+display's duration and target timestamps instead of the deprecated CoreVideo link.
+
+### Variable fonts and OpenType features
+
+`Typeface` reads the `fvar` table: `variationAxes()`, `namedInstances()` and `variations()` describe a variable face,
+and `withVariations` clones the face at a design-space position so two text runs can animate different axes without
+sharing one mutable FreeType face. `Font::withVariations` keeps the size, and `Font::shape` / `measureWidth` accept a
+span of `FontFeature` settings (`"kern"`, `"liga"`, `"salt"`, ...), with character ranges converted to the shaper's
+cluster space.
+
 ### When CoralGraphics is used as a submodule of a project
 
 The application adds its own `libz`, `libyuv`, `libgtest` and CoralCore before it adds this framework.

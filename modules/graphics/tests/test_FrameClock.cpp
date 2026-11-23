@@ -188,6 +188,25 @@ TEST(FrameClock, ThePlatformVBlankSourceExists) {
 }
 #endif
 
+#if defined(__APPLE__)
+TEST(FrameClock, TheAppleDisplayLinkSourceReportsTheDisplayCadence) {
+  // CADisplayLink needs a screen and a run loop. A headless build machine can have neither, so no
+  // source is a skip rather than a failure; a source that exists but never ticks is the failure.
+  auto source = graphics::gpu::makePlatformVBlankSource();
+  if (source == nullptr) GTEST_SKIP() << "no display link is available (headless machine or older OS)";
+
+  ASSERT_TRUE(source->waitForVBlank()) << "the first display-link tick did not arrive";
+  ASSERT_TRUE(source->waitForVBlank()) << "the second display-link tick did not arrive";
+
+  const graphics::gpu::RefreshInfo info = source->refresh();
+  EXPECT_TRUE(info.valid);
+  EXPECT_GT(info.hertz, 1.0);
+  EXPECT_LT(info.hertz, 1000.0);
+  EXPECT_GE(info.phaseSeconds, 0.0);
+  EXPECT_LT(info.phaseSeconds, 1.0);
+}
+#endif
+
 TEST(FrameClock, ModesAreRemembered) {  graphics::gpu::ManualFrameClock manual(Clock::time_point{});
   manual.setMode(graphics::gpu::FrameMode::LowLatency);
   EXPECT_EQ(manual.mode(), graphics::gpu::FrameMode::LowLatency);

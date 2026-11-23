@@ -144,7 +144,8 @@ enum class NativeDisplayKind : uint8_t {
  *
  * `display` is a `wl_display*` on Wayland or an X11 `Display*`; `surface` is a `wl_surface*` or
  * an X11 `Window` (the integer handle, carried as a pointer). Windows ignores both: DXGI's output
- * vblank is not per-window and needs no HWND.
+ * vblank is not per-window and needs no HWND. macOS reads `surface` as an `NSView*` or `NSWindow*`
+ * when it is one -- `CADisplayLink` is per-screen or per-view -- and otherwise follows the main screen.
  */
 struct NativeDisplay {
   NativeDisplayKind kind = NativeDisplayKind::Unknown;

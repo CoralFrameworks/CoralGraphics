@@ -504,10 +504,14 @@ if (CORAL_BACKEND_SUPPORTS_METAL)
   find_library(METAL_FRAMEWORK Metal REQUIRED)
   find_library(QUARTZCORE_FRAMEWORK QuartzCore REQUIRED)
   find_library(FOUNDATION_FRAMEWORK Foundation REQUIRED)
+  # CoreGraphics owns CGColorSpace, which is how CAMetalLayer is told whether its drawable is sRGB,
+  # Display P3, extended-linear P3 or PQ.
+  find_library(COREGRAPHICS_FRAMEWORK CoreGraphics REQUIRED)
   target_link_libraries(${TARGET} PUBLIC
       $<BUILD_INTERFACE:${METAL_FRAMEWORK}>
       $<BUILD_INTERFACE:${QUARTZCORE_FRAMEWORK}>
       $<BUILD_INTERFACE:${FOUNDATION_FRAMEWORK}>
+      $<BUILD_INTERFACE:${COREGRAPHICS_FRAMEWORK}>
   )
 endif ()
 
