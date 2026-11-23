@@ -22,6 +22,8 @@
 #include FT_FREETYPE_H
 
 
+#include <cstddef>
+#include <cstdint>
 #include <memory>
 #include <mutex>
 #include <string>
@@ -101,6 +103,16 @@ struct TypefaceImpl {
 
   /** The face index inside `filePath`; zero for the common single-face file. */
   uint32_t faceIndex = 0;
+
+  /**
+   * The bytes a memory face was created from, and their size.
+   *
+   * Kept so that a variation request can clone the face with `FT_New_Memory_Face` without asking the
+   * caller for the buffer again. The bytes themselves are owned by @c owner, exactly as before; this
+   * is a borrowed view that lives no longer than that owner.
+   */
+  const uint8_t* memoryData = nullptr;
+  size_t memorySize = 0;
 
   /**
    * Keeps the font's bytes alive when the face was created from memory.

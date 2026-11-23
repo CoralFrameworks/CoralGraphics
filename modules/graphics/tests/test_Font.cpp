@@ -42,8 +42,10 @@
 
 #include <gtest/gtest.h>
 
+#include <cmath>
 #include <cstdlib>
 #include <fstream>
+#include <span>
 #include <string>
 #include <vector>
 
@@ -76,6 +78,34 @@ std::string findSystemFont() {
   candidates.emplace_back("/usr/share/fonts/TTF/DejaVuSans.ttf");
   candidates.emplace_back("/system/fonts/Roboto-Regular.ttf");
   candidates.emplace_back("/System/Library/Fonts/Helvetica.ttc");
+
+  for (const std::string& path: candidates) {
+    std::ifstream file(path, std::ios::binary);
+    if (file.good()) return path;
+  }
+  return {};
+}
+
+/**
+ * @return a font with an `fvar` table, or an empty string.
+ *
+ * The candidates are the variable fonts the three desktop platforms ship with. A test that needs one
+ * skips rather than fails when none is installed, for the same reason the static tests skip: the
+ * repository does not commit a font, and a machine without a variable font is a plausible machine.
+ */
+std::string findVariableFont() {
+  std::vector<std::string> candidates;
+  if (const char* root = std::getenv("SystemRoot")) {
+    const std::string fonts = std::string(root) + "\\Fonts\\";
+    candidates.push_back(fonts + "bahnschrift.ttf");
+    candidates.push_back(fonts + "SegUIVar.ttf");
+  }
+  candidates.emplace_back("/System/Library/Fonts/SFNS.ttf");
+  candidates.emplace_back("/System/Library/Fonts/NewYork.ttf");
+  candidates.emplace_back("/System/Library/Fonts/SFCompact.ttf");
+  candidates.emplace_back("/usr/share/fonts/truetype/roboto/unhinted/RobotoTTF/Roboto-Regular.ttf");
+  candidates.emplace_back("/usr/share/fonts/truetype/roboto/Roboto-Regular.ttf");
+  candidates.emplace_back("/usr/share/fonts/truetype/noto/NotoSans[wdth,wght].ttf");
 
   for (const std::string& path: candidates) {
     std::ifstream file(path, std::ios::binary);
@@ -505,6 +535,135 @@ TEST(FontTest, BoundsCoversTheAdvanceAndTheTypographicExtent) {
   const Rect empty = TextBlob {}.bounds(ascent, descent);
   EXPECT_FLOAT_EQ(empty.getLeft(), 0.0f);
   EXPECT_FLOAT_EQ(empty.getRight(), 0.0f);
+}
+
+// ==================================================================================================
+// Variations and features
+// ==================================================================================================
+
+TEST(FontTest, AStaticFontHasNoVariationAxesAndRefusesAVariationRequest) {
+  const std::string path = findSystemFont();
+  if (path.empty()) GTEST_SKIP() << kNoFontMessage;
+
+  const auto typeface = Typeface::fromFile(path);
+  ASSERT_NE(typeface, nullptr);
+  if (typeface->hasVariations()) {
+    GTEST_SKIP() << "this machine's first system font is variable; the static path is covered elsewhere";
+  }
+
+  EXPECT_TRUE(typeface->variationAxes().empty());
+  EXPECT_TRUE(typeface->namedInstances().empty());
+  EXPECT_TRUE(typeface->variations().empty());
+
+  std::string error;
+  EXPECT_EQ(typeface->withVariations({ { "wght", 700.0f } }, &error), nullptr);
+  EXPECT_FALSE(error.empty()) << "a refused variation must say why";
+}
+
+TEST(FontTest, AVariableFontDeclaresItsAxesNamedInstancesAndCurrentPosition) {
+  const std::string path = findVariableFont();
+  if (path.empty()) GTEST_SKIP() << "no variable font was found on this machine";
+
+  const auto typeface = Typeface::fromFile(path);
+  ASSERT_NE(typeface, nullptr) << "failed to load " << path;
+  if (!typeface->hasVariations()) {
+    GTEST_SKIP() << path << " has no variation table FreeType can read";
+  }
+
+  const auto& axes = typeface->variationAxes();
+  ASSERT_FALSE(axes.empty());
+  for (const FontVariationAxis& axis: axes) {
+    EXPECT_EQ(axis.tag.size(), 4u);
+    EXPECT_LE(axis.minValue, axis.defaultValue);
+    EXPECT_LE(axis.defaultValue, axis.maxValue);
+  }
+
+  const auto& current = typeface->variations();
+  ASSERT_EQ(current.size(), axes.size());
+  for (size_t index = 0; index < axes.size(); ++index) {
+    EXPECT_EQ(current[index].tag, axes[index].tag);
+    EXPECT_NEAR(current[index].value, axes[index].defaultValue, 0.01f)
+            << "a face that has never been varied starts at its default position";
+  }
+
+  // Named instances are optional even on a variable font, so their contents are checked only when
+  // there are any; what must hold is that every coordinate names a real axis and is in range.
+  for (const FontNamedInstance& instance: typeface->namedInstances()) {
+    EXPECT_FALSE(instance.name.empty());
+    EXPECT_EQ(instance.variations.size(), axes.size());
+  }
+}
+
+TEST(FontTest, AVariableFontClonesAtACoordinateWithoutChangingTheOriginal) {
+  const std::string path = findVariableFont();
+  if (path.empty()) GTEST_SKIP() << "no variable font was found on this machine";
+
+  const auto typeface = Typeface::fromFile(path);
+  ASSERT_NE(typeface, nullptr);
+  if (!typeface->hasVariations()) GTEST_SKIP() << path << " has no readable variation table";
+
+  const FontVariationAxis axis = typeface->variationAxes().front();
+  const float target = axis.maxValue > axis.defaultValue
+          ? axis.defaultValue + (axis.maxValue - axis.defaultValue) * 0.5f
+          : axis.minValue;
+  if (std::fabs(target - axis.defaultValue) < 0.001f) {
+    GTEST_SKIP() << "the first axis has no range to move through";
+  }
+
+  std::string error;
+  const auto varied = typeface->withVariations({ { axis.tag, target } }, &error);
+  ASSERT_NE(varied, nullptr) << error;
+  ASSERT_EQ(varied->variations().size(), typeface->variations().size());
+  EXPECT_NEAR(varied->variations().front().value, target, 0.01f);
+  EXPECT_NEAR(typeface->variations().front().value, axis.defaultValue, 0.01f)
+          << "the original face must keep its own position";
+
+  // The clone is the same face otherwise: same family, same glyph set, same em.
+  EXPECT_EQ(varied->familyName(), typeface->familyName());
+  EXPECT_EQ(varied->glyphCount(), typeface->glyphCount());
+  EXPECT_EQ(varied->unitsPerEm(), typeface->unitsPerEm());
+
+  // A variation that names no axis, a tag of the wrong length, and a value outside the axis's range
+  // are all refused rather than clamped or silently ignored.
+  EXPECT_EQ(typeface->withVariations({ { "XXXX", axis.defaultValue } }, &error), nullptr);
+  EXPECT_FALSE(error.empty());
+  EXPECT_EQ(typeface->withVariations({ { "wg", axis.defaultValue } }, &error), nullptr);
+  EXPECT_FALSE(error.empty());
+  EXPECT_EQ(typeface->withVariations({ { axis.tag, axis.maxValue + 1.0f } }, &error), nullptr);
+  EXPECT_FALSE(error.empty());
+}
+
+TEST(FontTest, ShapeAcceptsAFeatureListAndAnEmptyOneIsTheDefault) {
+  const std::string path = findSystemFont();
+  if (path.empty()) GTEST_SKIP() << kNoFontMessage;
+
+  const auto typeface = Typeface::fromFile(path);
+  ASSERT_NE(typeface, nullptr);
+  const auto font = Font::create(typeface, 24.0f);
+  ASSERT_NE(font, nullptr);
+
+  const std::string text = "AV fi office";
+  const TextBlob plain = font->shape(text);
+  const TextBlob empty = font->shape(text, Font::Direction::Auto, {});
+  ASSERT_EQ(plain.count(), empty.count());
+  for (size_t index = 0; index < plain.count(); ++index) {
+    EXPECT_EQ(plain.glyphs()[index].id, empty.glyphs()[index].id);
+  }
+
+  // Disabling kerning can only widen a run whose font kerns, so the inequality holds whether or not
+  // this particular font carries a `kern` table or a `GPOS` kern feature. It is deliberately not an
+  // equality: a feature list that did nothing at all would pass an equality on a font without kerning,
+  // which is most of them.
+  const FontFeature noKerning { "kern", 0 };
+  const FontFeature noLigatures { "liga", 0, 0, 4 };
+  const float kerningWidth = font->measureWidth(text);
+  const float unkernedWidth = font->measureWidth(text, Font::Direction::Auto,
+          std::span<const FontFeature>(&noKerning, 1));
+  EXPECT_GE(unkernedWidth, kerningWidth - 0.01f);
+
+  const TextBlob shaped = font->shape(text, Font::Direction::Auto,
+          std::span<const FontFeature>(&noLigatures, 1));
+  EXPECT_FALSE(shaped.isEmpty());
 }
 
 // ==================================================================================================
