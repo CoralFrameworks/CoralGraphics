@@ -487,7 +487,10 @@ Result MetalDevice::createFallbackResources() {
                                                                                                height:1
                                                                                             mipmapped:NO];
   textureDescriptor.usage = MTLTextureUsageShaderRead;
-  textureDescriptor.storageMode = MTLStorageModePrivate;
+  // A private texture cannot be filled with `replaceRegion:`. The 1x1 fallback is uploaded once from the
+  // CPU, and on Apple's paravirtual Metal device the private upload path faults instead of failing
+  // validation; shared storage is the correct mode for this CPU-written texture.
+  textureDescriptor.storageMode = MTLStorageModeShared;
   mFallbackTexture = [mDevice newTextureWithDescriptor:textureDescriptor];
   if (mFallbackTexture == nil) return Result::OutOfMemory;
   mFallbackTexture.label = @"coral/fallback-texture";
