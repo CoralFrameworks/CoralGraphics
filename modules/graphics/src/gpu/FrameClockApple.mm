@@ -57,6 +57,35 @@
 #include <mutex>
 #include <thread>
 
+@class CoralDisplayLinkTarget;
+
+/** AppKit's NSView/NSScreen display-link factories require the main thread. */
+static CADisplayLink* createAppleDisplayLink(CoralDisplayLinkTarget* target, void* view) {
+  __block CADisplayLink* link = nil;
+  const auto create = ^{
+#if defined(TARGET_OS_OSX) && TARGET_OS_OSX
+    if (view != nullptr && [((__bridge id)view) isKindOfClass:[NSView class]]) {
+      link = [(__bridge NSView*)view displayLinkWithTarget:target selector:@selector(tick:)];
+    } else {
+      NSScreen* screen = [NSScreen mainScreen];
+      if (screen != nil) {
+        link = [screen displayLinkWithTarget:target selector:@selector(tick:)];
+      }
+    }
+#else
+    (void)view;
+    link = [CADisplayLink displayLinkWithTarget:target selector:@selector(tick:)];
+#endif
+  };
+  if ([NSThread isMainThread]) {
+    create();
+  } else {
+    dispatch_sync(dispatch_get_main_queue(), create);
+  }
+  return link;
+}
+
+
 namespace graphics::gpu {
 namespace {
 
@@ -68,6 +97,7 @@ bool appleDisplayLinkAvailable() {
   return true;
 #endif
 }
+
 
 class AppleDisplayLinkSource;
 
@@ -162,8 +192,13 @@ private:
   AppleDisplayLinkSource() = default;
 
   bool start(void* view) {
+    // AppKit's factories must run on the caller (normally the UI) thread. Create the link before
+    // starting the run-loop thread so this wait cannot deadlock on a dispatch_sync to the UI thread.
+    CoralDisplayLinkTarget* target = [[CoralDisplayLinkTarget alloc] initWithSource:this];
+    CADisplayLink* link = createAppleDisplayLink(target, view);
+    if (link == nil) return false;
     std::unique_lock<std::mutex> readyLock(mReadyMutex);
-    mThread = std::thread([this, view] { run(view); });
+    mThread = std::thread([this, link] { run(link); });
     return mReadyCondition.wait_for(readyLock, std::chrono::seconds(2),
                    [this] { return mReady || mStartupFailed; }) &&
            mReady;
@@ -181,23 +216,8 @@ private:
     mThread = std::thread();
   }
 
-  void run(void* view) {
+  void run(CADisplayLink* link) {
     @autoreleasepool {
-      CoralDisplayLinkTarget* target = [[CoralDisplayLinkTarget alloc] initWithSource:this];
-      CADisplayLink* link = nil;
-#if defined(TARGET_OS_OSX) && TARGET_OS_OSX
-      if (view != nullptr && [((__bridge id)view) isKindOfClass:[NSView class]]) {
-        link = [(__bridge NSView*)view displayLinkWithTarget:target selector:@selector(tick:)];
-      } else {
-        NSScreen* screen = [NSScreen mainScreen];
-        if (screen != nil) {
-          link = [screen displayLinkWithTarget:target selector:@selector(tick:)];
-        }
-      }
-#else
-      (void)view;
-      link = [CADisplayLink displayLinkWithTarget:target selector:@selector(tick:)];
-#endif
       if (link == nil) {
         {
           std::lock_guard<std::mutex> lock(mReadyMutex);
