@@ -407,7 +407,7 @@ class WindowSurface final {
   std::unique_ptr<Impl> mImpl;
  private:
   bool presentRecordingsImpl(const std::vector<const DrawList*>& lists, const Rect* damage,
-    const std::vector<ListItem>* states = nullptr);
+    const std::vector<ListItem>* states = nullptr, bool reuseOpenFrame = false);
 };
 
 } // namespace graphics::gpu
