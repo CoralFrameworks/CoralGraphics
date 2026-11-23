@@ -567,6 +567,13 @@ else ()
   target_sources(${TARGET} PRIVATE src/lottie/LottieParserUnavailable.cpp)
 endif ()
 
+# CoreVideo provides CVDisplayLink, the macOS display-blank source for FrameClock. It is a macOS-only
+# framework; iOS uses CADisplayLink and has no CVDisplayLink, so a cross build does not name it.
+if (APPLE AND NOT CMAKE_SYSTEM_NAME STREQUAL "iOS")
+  find_library(COREVIDEO_FRAMEWORK CoreVideo REQUIRED)
+  target_link_libraries(${TARGET} PRIVATE $<BUILD_INTERFACE:${COREVIDEO_FRAMEWORK}>)
+endif ()
+
 # ==================================================================================================
 # Installation
 # ==================================================================================================
