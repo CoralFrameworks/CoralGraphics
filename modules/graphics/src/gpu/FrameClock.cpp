@@ -18,7 +18,9 @@
 
 #include <algorithm>
 #include <cmath>
+#include <condition_variable>
 #include <cstdio>
+#include <mutex>
 #include <thread>
 
 #if defined(_WIN32)
@@ -26,6 +28,13 @@
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
 #include <dxgi.h>
+#endif
+
+#if defined(__APPLE__)
+#include <TargetConditionals.h>
+#if !TARGET_OS_IPHONE
+#include <CoreVideo/CVDisplayLink.h>
+#endif
 #endif
 
 namespace graphics::gpu {
@@ -1042,6 +1051,119 @@ class X11VBlankSource final : public VBlankSource {
 
 #endif // _WIN32 / __linux__
 
+#if defined(__APPLE__) && !TARGET_OS_IPHONE
+/**
+ * macOS's display tick: a CVDisplayLink callback on the display's own thread.
+ *
+ * The callback only records the tick and wakes a waiter. `waitForVBlank` is therefore a real
+ * display-blank wait rather than the 60 Hz guess `PresentFrameClock` falls back to, which is what
+ * gives `Window::refreshHertz()` the actual refresh rate (including 120 Hz ProMotion displays) and
+ * lets the clock align animations with the display phase.
+ */
+class MacVBlankSource final : public VBlankSource {
+ public:
+  static std::unique_ptr<MacVBlankSource> create() {
+    CVDisplayLinkRef link = nullptr;
+    if (CVDisplayLinkCreateWithActiveCGDisplays(&link) != kCVReturnSuccess || link == nullptr) {
+      return nullptr;
+    }
+    auto source = std::unique_ptr<MacVBlankSource>(new MacVBlankSource(link));
+    if (CVDisplayLinkSetOutputCallback(link, &MacVBlankSource::tick, source.get()) !=
+        kCVReturnSuccess) {
+      return nullptr;
+    }
+    if (CVDisplayLinkStart(link) != kCVReturnSuccess) {
+      return nullptr;
+    }
+    return source;
+  }
+
+  ~MacVBlankSource() override {
+    if (mLink != nullptr) {
+      CVDisplayLinkStop(mLink);
+      CVDisplayLinkRelease(mLink);
+      mLink = nullptr;
+    }
+  }
+
+  bool waitForVBlank() override {
+    std::unique_lock<std::mutex> lock(mMutex);
+    const uint64_t target = mTicks + 1;
+    mCondition.wait_for(lock, std::chrono::milliseconds(100),
+      [this, target] { return mTicks >= target; });
+    return mTicks >= target;
+  }
+
+  [[nodiscard]] RefreshInfo refresh() const override {
+    const std::lock_guard<std::mutex> lock(mMutex);
+    RefreshInfo info = mTiming.refresh();
+    // The callback's own cadence is measured on the callback thread and includes scheduling jitter;
+    // CoreVideo's actual period is the display's authoritative rate (and tracks ProMotion changes).
+    const double actualPeriod = CVDisplayLinkGetActualOutputVideoRefreshPeriod(mLink);
+    if (actualPeriod > 0.0) {
+      info.valid = true;
+      info.hertz = 1.0 / actualPeriod;
+      if (info.phaseSeconds <= 0.0) info.phaseSeconds = mTiming.phaseSeconds;
+    }
+    return info;
+  }
+
+ private:
+  explicit MacVBlankSource(CVDisplayLinkRef link) : mLink(link) {}
+
+  static CVReturn tick(CVDisplayLinkRef, const CVTimeStamp*, const CVTimeStamp*, CVOptionFlags,
+      CVOptionFlags*, void* context) {
+    auto* source = static_cast<MacVBlankSource*>(context);
+    {
+      const std::lock_guard<std::mutex> lock(source->mMutex);
+      source->mTiming.record(std::chrono::steady_clock::now());
+      ++source->mTicks;
+    }
+    source->mCondition.notify_all();
+    return kCVReturnSuccess;
+  }
+
+  struct Timing {
+    std::chrono::steady_clock::time_point last{};
+    double intervalSeconds = 1.0 / 60.0;
+    double phaseSeconds = 0.0;
+    uint32_t count = 0;
+    bool hasLast = false;
+
+    void record(const std::chrono::steady_clock::time_point now) noexcept {
+      if (hasLast) {
+        const double delta = std::chrono::duration<double>(now - last).count();
+        if (delta > 0.0 && std::isfinite(delta)) {
+          const double clamped = std::clamp(delta, kMinimumIntervalSeconds, kMaximumIntervalSeconds);
+          // The first interval is the only exact sample available; start there instead of at the
+          // 60 Hz default, so a 120 Hz ProMotion display is not reported as ~72 Hz for ten frames.
+          intervalSeconds = count == 1 ? clamped
+            : intervalSeconds + (clamped - intervalSeconds) * kIntervalSmoothing;
+        }
+      }
+      last = now;
+      hasLast = true;
+      phaseSeconds = phaseOf(now, intervalSeconds);
+      ++count;
+    }
+
+    [[nodiscard]] RefreshInfo refresh() const noexcept {
+      RefreshInfo info;
+      info.valid = count >= 2;
+      info.hertz = info.valid ? 1.0 / intervalSeconds : 0.0;
+      info.phaseSeconds = info.valid ? phaseSeconds : 0.0;
+      return info;
+    }
+  };
+
+  CVDisplayLinkRef mLink = nullptr;
+  mutable std::mutex mMutex;
+  std::condition_variable mCondition;
+  uint64_t mTicks = 0;
+  Timing mTiming;
+};
+#endif
+
 std::unique_ptr<VBlankSource> makePlatformVBlankSource() {
 #if defined(_WIN32)
   if (std::unique_ptr<DxgiVBlankSource> dxgi = DxgiVBlankSource::create(); dxgi != nullptr) {
@@ -1050,6 +1172,8 @@ std::unique_ptr<VBlankSource> makePlatformVBlankSource() {
   return std::make_unique<WindowsVBlankSource>();
 #elif defined(__linux__)
   return DrmVBlankSource::create();
+#elif defined(__APPLE__) && !TARGET_OS_IPHONE
+  return MacVBlankSource::create();
 #else
   return nullptr;
 #endif
@@ -1078,6 +1202,10 @@ std::unique_ptr<VBlankSource> makePlatformVBlankSource(const NativeDisplay& nati
   }
 #endif
   return DrmVBlankSource::create();
+#elif defined(__APPLE__) && !TARGET_OS_IPHONE
+  (void)native;
+  (void)waitForDisplay;
+  return MacVBlankSource::create();
 #else
   (void)native;
   return nullptr;

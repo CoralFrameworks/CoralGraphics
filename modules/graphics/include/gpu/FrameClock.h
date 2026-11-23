@@ -136,6 +136,7 @@ enum class NativeDisplayKind : uint8_t {
   Windows,
   X11,
   Wayland,
+  MacOS,
 };
 
 /**

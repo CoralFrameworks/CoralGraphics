@@ -704,6 +704,12 @@ bool WindowSurface::presentListItems(const std::vector<ListItem>& items) {
   mImpl->lastExternalRecording = nullptr;
   mImpl->retainedImages.clear();
   mImpl->retainedValid = false;
+  // `beginFrame` has already acquired a swapchain image and recorded the content list. Reusing that
+  // frame is what makes the plan path one acquire/present: re-beginning here would either deadlock on
+  // the already-acquired drawable or present twice and flash the boundary-less content.
+  if (mImpl->frameOpen) {
+    return presentRecordingsImpl(lists, nullptr, &states, true);
+  }
   mImpl->canvas.reset();
   mImpl->frameOpen = false;
   mImpl->recording.reset();
@@ -730,7 +736,7 @@ bool WindowSurface::presentRecordings(const std::vector<std::shared_ptr<const Dr
 }
 
 bool WindowSurface::presentRecordingsImpl(const std::vector<const DrawList*>& lists, const Rect* damage,
-    const std::vector<ListItem>* states) {
+    const std::vector<ListItem>* states, const bool reuseOpenFrame) {
   if (lists.empty()) return false;
   if (mImpl == nullptr || mImpl->context == nullptr) return false;
   if (!backend::isSuccess(mImpl->device->makeCurrent())) {
@@ -739,36 +745,41 @@ bool WindowSurface::presentRecordingsImpl(const std::vector<const DrawList*>& li
   }
   if (mImpl->group != nullptr) mImpl->group->drainDeferredReleases(mImpl->device);
 
-  // A frame recorded through `beginFrame` is not the input here; abandon it rather than mixing two
-  // recordings into one frame.
-  mImpl->canvas.reset();
-  mImpl->frameOpen = false;
-  mImpl->retainedValid = false;
-  mImpl->recording.reset();
+  if (!reuseOpenFrame) {
+    // A frame recorded through `beginFrame` is not the input here; abandon it rather than mixing two
+    // recordings into one frame.
+    mImpl->canvas.reset();
+    mImpl->frameOpen = false;
+    mImpl->retainedValid = false;
+    mImpl->recording.reset();
 
-  backend::SwapchainInfo info;
-  backend::Result acquired = mImpl->device->beginFrame(mImpl->swapchain, &info, mImpl->acquireSemaphore);
-  if (acquired == backend::Result::OutOfDate) {
-    if (!resize(mImpl->width, mImpl->height)) return false;
-    acquired = mImpl->device->beginFrame(mImpl->swapchain, &info, mImpl->acquireSemaphore);
-  }
-  if (!backend::isSuccess(acquired)) {
-    mImpl->diagnostics = "the swapchain could not hand over a frame (result " +
-      std::to_string(static_cast<int>(acquired)) + ")";
+    backend::SwapchainInfo info;
+    backend::Result acquired = mImpl->device->beginFrame(mImpl->swapchain, &info, mImpl->acquireSemaphore);
+    if (acquired == backend::Result::OutOfDate) {
+      if (!resize(mImpl->width, mImpl->height)) return false;
+      acquired = mImpl->device->beginFrame(mImpl->swapchain, &info, mImpl->acquireSemaphore);
+    }
+    if (!backend::isSuccess(acquired)) {
+      mImpl->diagnostics = "the swapchain could not hand over a frame (result " +
+        std::to_string(static_cast<int>(acquired)) + ")";
+      return false;
+    }
+    mImpl->presentMode = info.presentMode;
+    if (info.width != 0 && info.height != 0 && (info.width != mImpl->width || info.height != mImpl->height)) {
+      if (!resize(info.width, info.height)) return false;
+    }
+    if (mImpl->targets.empty()) return false;
+
+    mImpl->activeTarget = mImpl->hasFrame
+      ? (mImpl->activeTarget + 1u) % static_cast<uint32_t>(mImpl->targets.size())
+      : 0u;
+    mImpl->hasFrame = true;
+    mImpl->context->selectFrameSlot(mImpl->activeTarget);
+    mImpl->swapchainTarget = mImpl->targets[mImpl->activeTarget];
+  } else if (!mImpl->frameOpen || !mImpl->uiTarget.isValid()) {
+    mImpl->diagnostics = "a plan frame had no open frame to complete";
     return false;
   }
-  mImpl->presentMode = info.presentMode;
-  if (info.width != 0 && info.height != 0 && (info.width != mImpl->width || info.height != mImpl->height)) {
-    if (!resize(info.width, info.height)) return false;
-  }
-  if (mImpl->targets.empty()) return false;
-
-  mImpl->activeTarget = mImpl->hasFrame
-    ? (mImpl->activeTarget + 1u) % static_cast<uint32_t>(mImpl->targets.size())
-    : 0u;
-  mImpl->hasFrame = true;
-  mImpl->context->selectFrameSlot(mImpl->activeTarget);
-  mImpl->swapchainTarget = mImpl->targets[mImpl->activeTarget];
 
   // The persistent UI target is the surface that receives a damage rectangle on later frames; it is
   // recreated here for the same reason `beginFrame` does it.
@@ -835,6 +846,11 @@ bool WindowSurface::presentRecordingsImpl(const std::vector<const DrawList*>& li
     mImpl->diagnostics = "the swapchain could not present: " +
       std::to_string(static_cast<int>(presented));
     return false;
+  }
+  if (reuseOpenFrame) {
+    mImpl->canvas.reset();
+    mImpl->frameOpen = false;
+    mImpl->recording.reset();
   }
   return true;
 }
