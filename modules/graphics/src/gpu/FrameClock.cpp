@@ -1096,7 +1096,16 @@ class MacVBlankSource final : public VBlankSource {
 
   [[nodiscard]] RefreshInfo refresh() const override {
     const std::lock_guard<std::mutex> lock(mMutex);
-    return mTiming.refresh();
+    RefreshInfo info = mTiming.refresh();
+    // The callback's own cadence is measured on the callback thread and includes scheduling jitter;
+    // CoreVideo's actual period is the display's authoritative rate (and tracks ProMotion changes).
+    const double actualPeriod = CVDisplayLinkGetActualOutputVideoRefreshPeriod(mLink);
+    if (actualPeriod > 0.0) {
+      info.valid = true;
+      info.hertz = 1.0 / actualPeriod;
+      if (info.phaseSeconds <= 0.0) info.phaseSeconds = mTiming.phaseSeconds;
+    }
+    return info;
   }
 
  private:
