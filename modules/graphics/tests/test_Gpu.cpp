@@ -7003,7 +7003,8 @@ TEST(GpuSurface, TheGlslFallbackCoversEveryCanvasShader) {
   // source in the wrong dialect (the driver rejects it) and a missing binding name (the sampler reads an
   // unbound unit, which looks like a wrong texture rather than an error).
   const char* const required[] = { "quad.vert", "quad.frag", "path.vert", "path.frag",
-                                   "composite.vert", "composite.frag", "mask.frag", "coverage.frag" };
+                                   "composite.vert", "composite.frag", "mask.frag", "coverage.frag",
+                                   "present.frag" };
   for (const char* name: required) {
     const graphics::gpu::shaders::glsl::Source source = graphics::gpu::shaders::glsl::find(name);
     ASSERT_TRUE(source.isValid()) << name << " is missing from the GLSL fallback";
@@ -7020,7 +7021,7 @@ TEST(GpuSurface, TheGlslFallbackCoversEveryCanvasShader) {
       EXPECT_GT(std::strlen(source.bindings[index].name), 0u);
     }
   }
-  EXPECT_EQ(graphics::gpu::shaders::glsl::count(), 13u);
+  EXPECT_EQ(graphics::gpu::shaders::glsl::count(), 14u);
 }
 
 TEST(GpuSurface, AFrameThatIsNeverSubmittedCanStillBeDestroyed) {

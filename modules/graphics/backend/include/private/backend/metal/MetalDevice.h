@@ -290,6 +290,8 @@ struct MetalSwapchain {
   MTLPixelFormat mtlFormat = MTLPixelFormatInvalid;
   PresentMode presentMode = PresentMode::Fifo;
   bool srgb = false;
+  /** The colour space the CAMetalLayer presents in. */
+  SwapchainColorSpace colorSpace = SwapchainColorSpace::Srgb;
   uint32_t imageCount = 2;
   bool outOfDate = false;
 

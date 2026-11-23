@@ -127,6 +127,23 @@ struct RenderTargetDescription {
 };
 
 /**
+ * What the colour-managed presentation pass should do with one source target.
+ *
+ * The source is either the canvas's 8-bit sRGB target (`sourceIsLinear == false`) or the linear P3
+ * 16F target the first presentation stage produced. `outputColorSpace` says how the result is written:
+ * PQ, extended linear or gamma-encoded P3. The pass is separate from the canvas so that the canvas can
+ * keep its premultiplied 8-bit sRGB contract while the window does its colour management in float.
+ */
+struct PresentationParameters {
+  /** True when @c source already holds linear P3 values rather than sRGB-encoded ones. */
+  bool sourceIsLinear = false;
+  /** The encoding written into the destination. Only the HDR/P3 values are meaningful here. */
+  backend::SwapchainColorSpace outputColorSpace = backend::SwapchainColorSpace::Srgb;
+  /** SDR diffuse white in cd/m^2, used by the PQ encode. */
+  float sdrWhiteNits = 203.0f;
+};
+
+/**
  * The GPU-side state one surface records into and renders with.
  *
  * ## What this owns, and what it deliberately does not
@@ -283,6 +300,17 @@ public:
    * That wait is why `Surface::snapshot` documents itself as expensive, and why the rasterizer
    * comparison in the tests is the only place that pays it per frame.
    */
+  /**
+   * Runs the colour-managed presentation pass from @p source into @p target.
+   *
+   * One full-target draw: decode the source, convert Rec.709 primaries to the output gamut, and write
+   * the requested encoding. The caller owns the two targets; this method does not allocate one.
+   */
+  [[nodiscard]] backend::Result present(const RenderTarget& source, RenderTarget& target,
+    const PresentationParameters& parameters,
+    backend::SemaphoreHandle waitSemaphore = backend::SemaphoreHandle::invalid(),
+    backend::SemaphoreHandle signalSemaphore = backend::SemaphoreHandle::invalid());
+
   [[nodiscard]] backend::Result readback(RenderTarget& target, Bitmap* outBitmap);
 
   /** Blocks until every submitted frame has completed. */

@@ -716,6 +716,7 @@ if (CORAL_BUILD_TESTS)
       tests/test_GpuDamage.cpp
       tests/test_FrameClock.cpp
       tests/test_WindowSurface.cpp
+      tests/test_Presentation.cpp
       tests/test_GlyphPath.cpp
       tests/test_DecodeLimits.cpp
       tests/test_ImageCodec.cpp
@@ -747,6 +748,22 @@ if (CORAL_BUILD_TESTS)
       tests/test_main.cpp
   )
   target_link_libraries(test_${TARGET} PRIVATE ${TARGET} gtest)
+
+  # The macOS window test is Objective-C++ because the window and its CAMetalLayer are, and it uses AppKit,
+  # so it is added only for a macOS configure; the C++ `test_WindowSurface.cpp` covers the platforms it can.
+  if (APPLE AND NOT CMAKE_SYSTEM_NAME STREQUAL "iOS" AND CORAL_BACKEND_SUPPORTS_METAL)
+    target_sources(test_${TARGET} PRIVATE tests/test_WindowSurfaceMac.mm)
+    set_source_files_properties(tests/test_WindowSurfaceMac.mm PROPERTIES COMPILE_OPTIONS "-fobjc-arc")
+    find_library(APPKIT_FRAMEWORK AppKit REQUIRED)
+    find_library(QUARTZCORE_FRAMEWORK QuartzCore REQUIRED)
+    find_library(METAL_FRAMEWORK Metal REQUIRED)
+    find_library(FOUNDATION_FRAMEWORK Foundation REQUIRED)
+    target_link_libraries(test_${TARGET} PRIVATE
+        $<BUILD_INTERFACE:${APPKIT_FRAMEWORK}>
+        $<BUILD_INTERFACE:${QUARTZCORE_FRAMEWORK}>
+        $<BUILD_INTERFACE:${METAL_FRAMEWORK}>
+        $<BUILD_INTERFACE:${FOUNDATION_FRAMEWORK}>)
+  endif ()
 
   # The colour tests reach into `gcms` on purpose: the primitives are what the facade is built from,
   # and testing them only through the facade would leave the arithmetic itself uncovered.

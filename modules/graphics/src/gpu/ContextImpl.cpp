@@ -234,6 +234,13 @@ uint32_t ContextImpl::imageAtlasPageCount() const noexcept {
   return mRenderer != nullptr ? mRenderer->imageAtlasPageCount() : 0;
 }
 
+backend::Result ContextImpl::present(const RenderTarget& source, RenderTarget& target,
+    const PresentationParameters& parameters, const backend::SemaphoreHandle waitSemaphore,
+    const backend::SemaphoreHandle signalSemaphore) {
+  if (mRenderer == nullptr) return backend::Result::Unsupported;
+  return mRenderer->present(source, target, parameters, waitSemaphore, signalSemaphore);
+}
+
 backend::Result ContextImpl::readback(RenderTarget& target, Bitmap* outBitmap) {
   if (mRenderer == nullptr) {
     return backend::Result::Unsupported;

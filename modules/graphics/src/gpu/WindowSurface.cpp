@@ -86,8 +86,14 @@ struct WindowSurface::Impl {
   bool displayLinkFrame = false;
   /** True when the targets carry PQ numbers; drives the presentation pass and every recreated target. */
   bool pqOutput = false;
-  /** The colour space the swapchain was created with; `Srgb` on every path the canvas supports. */
+  /** What the caller asked the swapchain for; the granted value is `colorSpace`. */
+  backend::SwapchainColorSpace requestedColorSpace = backend::SwapchainColorSpace::Srgb;
+  /** The colour space the swapchain actually granted. */
   backend::SwapchainColorSpace colorSpace = backend::SwapchainColorSpace::Srgb;
+  /** Diffuse white for the PQ/EDR presentation, in cd/m^2. */
+  float sdrWhiteNits = 203.0f;
+  /** The linear 16F target between the canvas and the display encoding; only for a managed output. */
+  RenderTarget linearTarget;
   bool frameOpen = false;
   /** True when this device adopted a share context from its group. */
   bool sharedWithGroup = false;
@@ -132,6 +138,7 @@ WindowSurface::~WindowSurface() {
     mImpl->acquireSemaphore = backend::SemaphoreHandle::invalid();
     mImpl->renderFinishedSemaphore = backend::SemaphoreHandle::invalid();
     if (mImpl->scratch.isValid()) mImpl->context->destroyRenderTarget(mImpl->scratch);
+    if (mImpl->linearTarget.isValid()) mImpl->context->destroyRenderTarget(mImpl->linearTarget);
     for (RenderTarget& slot: mImpl->targets) mImpl->context->destroyRenderTarget(slot);
     mImpl->targets.clear();
     mImpl->target = RenderTarget {};
@@ -207,6 +214,9 @@ std::unique_ptr<WindowSurface> WindowSurface::make(const Configuration& configur
   // A demo can try HDR without a new API knob; the configuration field remains the product-facing one.
   WindowSurface::Configuration effective = configuration;
   if (std::getenv("CORAL_HDR_OUTPUT") != nullptr) effective.hdrOutput = true;
+  if (effective.hdrOutput && effective.outputColorSpace == backend::SwapchainColorSpace::Srgb) {
+    effective.outputColorSpace = backend::SwapchainColorSpace::Hdr10Pq;
+  }
   if (!surface->initialize(device, true, effective)) {
     return nullptr;
   }
@@ -218,8 +228,12 @@ std::unique_ptr<WindowSurface> WindowSurface::makeOn(backend::Device* device, co
       configuration.height == 0) {
     return nullptr;
   }
+  WindowSurface::Configuration effective = configuration;
+  if (effective.hdrOutput && effective.outputColorSpace == backend::SwapchainColorSpace::Srgb) {
+    effective.outputColorSpace = backend::SwapchainColorSpace::Hdr10Pq;
+  }
   auto surface = std::unique_ptr<WindowSurface>(new WindowSurface());
-  if (!surface->initialize(device, false, configuration)) {
+  if (!surface->initialize(device, false, effective)) {
     return nullptr;
   }
   return surface;
@@ -269,20 +283,32 @@ bool WindowSurface::initialize(backend::Device* device, const bool ownsDevice, c
   // The requested format is only a preference. The swapchain may grant B8G8R8A8 instead, and a
   // dynamic-rendering pipeline's attachment format has to equal the swapchain image's format, so the
   // target is created from `SwapchainInfo::format` rather than from the request.
-  swapchainDescriptor.format = backend::PixelFormat::R8G8B8A8_UNORM;
-  swapchainDescriptor.presentMode = configuration.presentMode;
-  // ## The HDR request: a 10-bit PQ pair when the surface has one
   //
-  // The surface only *asks*; the backend grants or falls back. `SwapchainInfo::colorSpace` below is what
-  // decides whether the presentation pass encodes PQ, so a display without HDR10 keeps the SDR picture
-  // rather than receiving PQ numbers it would interpret as sRGB.
-  // The capability is filled in *by* creating a swapchain (the surface format list is per-surface), so
-  // it is not available yet here. Ask, and let the backend select or fall back; `SwapchainInfo` below
-  // reports which happened.
-  const bool hdrRequested = configuration.hdrOutput;
-  if (hdrRequested) {
-    swapchainDescriptor.format = backend::PixelFormat::R10G10B10A2_UNORM;
-    swapchainDescriptor.colorSpace = backend::SwapchainColorSpace::Hdr10Pq;
+  // ## The output colour space selects the swapchain format
+  //
+  // The surface only *asks*; the backend grants or falls back, and `SwapchainInfo::colorSpace` below is
+  // what the presentation pass reads. A 16F swapchain is the EDR path (values above 1.0 have headroom);
+  // PQ needs a 10-bit UNORM target; P3 SDR is an ordinary 8-bit target with a wide-gamut colour space.
+  impl.requestedColorSpace = configuration.outputColorSpace;
+  impl.sdrWhiteNits = configuration.sdrWhiteNits > 0.0f ? configuration.sdrWhiteNits : 203.0f;
+  swapchainDescriptor.presentMode = configuration.presentMode;
+  switch (configuration.outputColorSpace) {
+    case backend::SwapchainColorSpace::Srgb:
+      swapchainDescriptor.format = backend::PixelFormat::R8G8B8A8_UNORM;
+      swapchainDescriptor.colorSpace = backend::SwapchainColorSpace::Srgb;
+      break;
+    case backend::SwapchainColorSpace::DisplayP3:
+      swapchainDescriptor.format = backend::PixelFormat::R8G8B8A8_UNORM;
+      swapchainDescriptor.colorSpace = backend::SwapchainColorSpace::DisplayP3;
+      break;
+    case backend::SwapchainColorSpace::ExtendedLinearP3:
+      swapchainDescriptor.format = backend::PixelFormat::R16G16B16A16_SFLOAT;
+      swapchainDescriptor.colorSpace = backend::SwapchainColorSpace::ExtendedLinearP3;
+      break;
+    case backend::SwapchainColorSpace::Hdr10Pq:
+      swapchainDescriptor.format = backend::PixelFormat::R10G10B10A2_UNORM;
+      swapchainDescriptor.colorSpace = backend::SwapchainColorSpace::Hdr10Pq;
+      break;
   }
   if (!backend::isSuccess(device->createSwapchain(swapchainDescriptor, &impl.swapchain))) {
     impl.diagnostics = "the backend refused the swapchain for this window";
@@ -314,24 +340,29 @@ bool WindowSurface::initialize(backend::Device* device, const bool ownsDevice, c
   // requested Immediate has to be able to see that it did not get it.
   impl.presentMode = hasGrantedInfo ? granted.presentMode : configuration.presentMode;
   impl.colorSpace = hasGrantedInfo ? granted.colorSpace : backend::SwapchainColorSpace::Srgb;
-  // ## PQ output is a property of every target, not of the swapchain alone
+  // ## The canvas target is never PQ now
   //
-  // `pqOutput` is what makes `image.frag` encode into the frame; the targets rotate, so each one carries
-  // the flag, and a resize recreates them from `impl.pqOutput`.
-  impl.pqOutput = impl.colorSpace == backend::SwapchainColorSpace::Hdr10Pq;
-  if (impl.pqOutput) {
+  // The old HDR path made `image.frag` encode PQ straight into the window's 8-bit canvas. That is the
+  // SDR-in-an-HDR-container transform and it stays available through `SurfaceConfiguration::pqOutput`;
+  // the window path instead keeps the canvas in sRGB and runs the linear 16F presentation pass, which
+  // is the only way an EDR value above diffuse white survives to the swapchain.
+  impl.pqOutput = false;
+  for (RenderTarget& slot: impl.targets) slot.pqOutput = false;
+  impl.target.pqOutput = false;
+  if (impl.colorSpace == backend::SwapchainColorSpace::Hdr10Pq) {
     // HDR10 static metadata: the PQ numbers alone do not tell the compositor what they mean. The values
     // describe SDR content in an HDR container (BT.2408 white at 203 cd/m^2), which is what the output
     // stage encodes; a backend without VK_EXT_hdr_metadata reports Unsupported, which is accepted here.
     backend::HdrMetadata hdr;
-    hdr.maxContentLightLevel = 203.0f;
-    hdr.maxFrameAverageLightLevel = 203.0f;
+    hdr.maxContentLightLevel = impl.sdrWhiteNits;
+    hdr.maxFrameAverageLightLevel = impl.sdrWhiteNits;
     (void)device->setHdrMetadata(impl.swapchain, hdr);
   }
-  for (RenderTarget& slot: impl.targets) slot.pqOutput = impl.pqOutput;
-  impl.target.pqOutput = impl.pqOutput;
-  if (configuration.hdrOutput && !impl.pqOutput) {
-    impl.diagnostics = "HDR output was requested but this surface has no HDR10 swapchain; presenting in sRGB";
+  if (configuration.outputColorSpace != backend::SwapchainColorSpace::Srgb &&
+      impl.colorSpace != configuration.outputColorSpace) {
+    impl.diagnostics = "the output colour space was requested but this surface granted " +
+            std::string(impl.colorSpace == backend::SwapchainColorSpace::Srgb ? "Srgb" : "another space") +
+            "; presenting in the granted space";
   }
   return true;
 }
@@ -546,36 +577,99 @@ bool WindowSurface::blitToSwapchain(bool waitAcquire) {
     if (mImpl != nullptr) mImpl->diagnostics = "the window blit has no UI or swapchain target";
     return false;
   }
-  DrawList::ExternalImage image;
-  image.texture = mImpl->uiTarget.color;
-  image.view = mImpl->uiTarget.colorView;
-  image.width = mImpl->uiTarget.width;
-  image.height = mImpl->uiTarget.height;
-  image.format = mImpl->uiTarget.format;
-  image.premultiplied = true;
 
-  gpu::Recorder recorder(static_cast<int>(mImpl->width), static_cast<int>(mImpl->height),
-    mImpl->context.get());
-  graphics::Canvas& canvas = recorder.canvas();
-  const Rect targetRect = Rect::MakeLTRB(0.0f, 0.0f, static_cast<Scalar>(mImpl->width),
-    static_cast<Scalar>(mImpl->height));
-  Paint paint;
-  paint.color = graphics::Color::White();
-  paint.style = Paint::Style::kFill;
-  paint.blendMode = BlendMode::kSrc;
-  canvas.drawExternalImage(image, targetRect, paint);
-  DrawList blit = recorder.finish();
+  // ## The SDR path is still the direct blit
+  //
+  // No colour conversion is needed and an extra 16F target would be a copy for nothing. `image.frag`
+  // carries the source through unchanged, and the swapchain's own sRGB/present handling is the SDR
+  // reference this path has always produced.
+  if (mImpl->colorSpace == backend::SwapchainColorSpace::Srgb) {
+    DrawList::ExternalImage image;
+    image.texture = mImpl->uiTarget.color;
+    image.view = mImpl->uiTarget.colorView;
+    image.width = mImpl->uiTarget.width;
+    image.height = mImpl->uiTarget.height;
+    image.format = mImpl->uiTarget.format;
+    image.premultiplied = true;
 
-  const backend::Result submitted = mImpl->context->submit(blit,
-    mImpl->targets[mImpl->activeTarget], {}, backend::LoadOp::Clear,
-    waitAcquire ? mImpl->acquireWait() : backend::SemaphoreHandle::invalid(),
-    mImpl->renderFinishedSemaphore);
-  if (!backend::isSuccess(submitted)) {
-    mImpl->diagnostics = "the window blit could not be submitted";
+    gpu::Recorder recorder(static_cast<int>(mImpl->width), static_cast<int>(mImpl->height),
+      mImpl->context.get());
+    graphics::Canvas& canvas = recorder.canvas();
+    const Rect targetRect = Rect::MakeLTRB(0.0f, 0.0f, static_cast<Scalar>(mImpl->width),
+      static_cast<Scalar>(mImpl->height));
+    Paint paint;
+    paint.color = graphics::Color::White();
+    paint.style = Paint::Style::kFill;
+    paint.blendMode = BlendMode::kSrc;
+    canvas.drawExternalImage(image, targetRect, paint);
+    DrawList blit = recorder.finish();
+
+    const backend::Result submitted = mImpl->context->submit(blit,
+      mImpl->targets[mImpl->activeTarget], {}, backend::LoadOp::Clear,
+      waitAcquire ? mImpl->acquireWait() : backend::SemaphoreHandle::invalid(),
+      mImpl->renderFinishedSemaphore);
+    if (!backend::isSuccess(submitted)) {
+      mImpl->diagnostics = "the window blit could not be submitted";
+      return false;
+    }
+    if (!backend::isSuccess(mImpl->context->waitFrameSlot(mImpl->activeTarget))) {
+      mImpl->diagnostics = "the window blit did not finish";
+      return false;
+    }
+    return true;
+  }
+
+  // ## The colour-managed path: canvas (sRGB) -> linear P3 16F -> display encoding
+  //
+  // The first pass is the linear 16F presentation pass. It decodes the canvas, converts Rec.709 to
+  // Display P3 and writes float values, so the second pass has a target that can hold highlight
+  // headroom and does not band. The second pass writes the encoding the granted swapchain needs: PQ,
+  // extended linear (EDR) or gamma-encoded P3.
+  constexpr backend::PixelFormat kLinearFormat = backend::PixelFormat::R16G16B16A16_SFLOAT;
+  if (!mImpl->linearTarget.isValid() || mImpl->linearTarget.width != mImpl->width ||
+      mImpl->linearTarget.height != mImpl->height || mImpl->linearTarget.format != kLinearFormat) {
+    if (mImpl->linearTarget.isValid()) mImpl->context->destroyRenderTarget(mImpl->linearTarget);
+    RenderTargetDescription description;
+    description.width = mImpl->width;
+    description.height = mImpl->height;
+    description.format = kLinearFormat;
+    description.needsStencil = false;
+    description.sampleCount = 1;
+    description.sampled = true;
+    description.readable = false;
+    description.label = "window-present-linear";
+    if (!backend::isSuccess(mImpl->context->createRenderTarget(description, &mImpl->linearTarget))) {
+      mImpl->diagnostics = "the linear presentation target could not be created";
+      return false;
+    }
+  }
+
+  const PresentationParameters linearParameters {
+    .sourceIsLinear = false,
+    .outputColorSpace = backend::SwapchainColorSpace::ExtendedLinearP3,
+    .sdrWhiteNits = mImpl->sdrWhiteNits,
+  };
+  backend::Result result = mImpl->context->present(mImpl->uiTarget, mImpl->linearTarget, linearParameters);
+  if (!backend::isSuccess(result)) {
+    mImpl->diagnostics = "the linear 16F presentation pass could not be rendered";
+    return false;
+  }
+
+  const PresentationParameters displayParameters {
+    .sourceIsLinear = true,
+    .outputColorSpace = mImpl->colorSpace,
+    .sdrWhiteNits = mImpl->sdrWhiteNits,
+  };
+  result = mImpl->context->present(mImpl->linearTarget, mImpl->targets[mImpl->activeTarget],
+          displayParameters,
+          waitAcquire ? mImpl->acquireWait() : backend::SemaphoreHandle::invalid(),
+          mImpl->renderFinishedSemaphore);
+  if (!backend::isSuccess(result)) {
+    mImpl->diagnostics = "the display-encoding presentation pass could not be rendered";
     return false;
   }
   if (!backend::isSuccess(mImpl->context->waitFrameSlot(mImpl->activeTarget))) {
-    mImpl->diagnostics = "the window blit did not finish";
+    mImpl->diagnostics = "the presentation passes did not finish";
     return false;
   }
   return true;
@@ -934,6 +1028,10 @@ bool WindowSurface::resize(const uint32_t width, const uint32_t height) {
   if (mImpl->scratch.isValid()) {
     mImpl->context->destroyRenderTarget(mImpl->scratch);
     mImpl->scratch = RenderTarget {};
+  }
+  if (mImpl->linearTarget.isValid()) {
+    mImpl->context->destroyRenderTarget(mImpl->linearTarget);
+    mImpl->linearTarget = RenderTarget {};
   }
   for (RenderTarget& slot: mImpl->targets) {
     if (slot.isValid()) mImpl->context->destroyRenderTarget(slot);

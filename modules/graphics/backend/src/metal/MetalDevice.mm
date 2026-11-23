@@ -296,6 +296,14 @@ Result MetalDevice::createDevice(const DeviceConfiguration& configuration) {
   }
   mCompletionEvent.label = @"coral/metal/completion";
 
+  // A CAMetalLayer can be configured for Display P3 and for PQ/EDR on every Metal device; whether the
+  // *display* has the gamut or the headroom is a property of the surface, not of the device, and the
+  // swapchain's granted colour space reports the difference. These flags are what a caller uses to
+  // decide whether to offer the controls at all, so reporting them here keeps that answer from being
+  // "nothing, because the backend never said".
+  mCapabilities.displayP3Swapchain = true;
+  mCapabilities.hdr10Swapchain = true;
+
   mBackendName = "coral/backend/metal";
   return Result::Success;
 }

@@ -222,6 +222,42 @@ Result VulkanDevice::createSwapchainObjects(const SwapchainDescriptor& descripto
   // this swapchain. A surface that lists neither half of the pair gets a warning and the SDR path,
   // because a window that refused to open would be a worse answer than one that presents SDR.
   const bool wantsHdr = descriptor.colorSpace == SwapchainColorSpace::Hdr10Pq;
+  const bool wantsP3 = descriptor.colorSpace == SwapchainColorSpace::DisplayP3;
+  const bool wantsEdr = descriptor.colorSpace == SwapchainColorSpace::ExtendedLinearP3;
+  if (wantsP3) {
+    // Wide-gamut SDR: an 8-bit image with the P3 non-linear colour space. The presentation pass
+    // gamma-encodes after converting primaries, so the format stays 8-bit.
+    for (const VkSurfaceFormatKHR& candidate: formats) {
+      if (candidate.colorSpace == VK_COLOR_SPACE_DISPLAY_P3_NONLINEAR_EXT &&
+          (candidate.format == requested || candidate.format == VK_FORMAT_B8G8R8A8_UNORM ||
+           candidate.format == VK_FORMAT_R8G8B8A8_UNORM)) {
+        chosen = candidate;
+        found = true;
+        break;
+      }
+    }
+    if (!found) {
+      emitMessage(MessageSeverity::Warning,
+              "Display-P3 output was requested but this surface offers no P3 pair; the swapchain falls back to SDR");
+    }
+  }
+  if (wantsEdr) {
+    // Vulkan has no extended-linear P3 colour space; the closest is linear P3 on a float image. A
+    // surface that offers neither that pair nor a float format falls back to SDR rather than pretending.
+    for (const VkSurfaceFormatKHR& candidate: formats) {
+      if (candidate.colorSpace == VK_COLOR_SPACE_DISPLAY_P3_LINEAR_EXT &&
+          candidate.format == VK_FORMAT_R16G16B16A16_SFLOAT) {
+        chosen = candidate;
+        found = true;
+        break;
+      }
+    }
+    if (!found) {
+      emitMessage(MessageSeverity::Warning,
+              "extended-linear P3 was requested but this Vulkan surface offers no linear-P3 float pair; "
+              "the swapchain falls back to SDR");
+    }
+  }
   if (wantsHdr) {
     for (const VkSurfaceFormatKHR& candidate: formats) {
       if (candidate.colorSpace == VK_COLOR_SPACE_HDR10_ST2084_EXT &&
@@ -463,8 +499,9 @@ Result VulkanDevice::createSwapchainObjects(const SwapchainDescriptor& descripto
   swapchain->presentMode = fromVkPresentMode(presentMode);
   swapchain->colorSpace =
     chosen.colorSpace == VK_COLOR_SPACE_DISPLAY_P3_NONLINEAR_EXT ? SwapchainColorSpace::DisplayP3
-    : chosen.colorSpace == VK_COLOR_SPACE_HDR10_ST2084_EXT     ? SwapchainColorSpace::Hdr10Pq
-                                                              : SwapchainColorSpace::Srgb;
+    : chosen.colorSpace == VK_COLOR_SPACE_DISPLAY_P3_LINEAR_EXT  ? SwapchainColorSpace::ExtendedLinearP3
+    : chosen.colorSpace == VK_COLOR_SPACE_HDR10_ST2084_EXT       ? SwapchainColorSpace::Hdr10Pq
+                                                                 : SwapchainColorSpace::Srgb;
   swapchain->imageCount = static_cast<uint32_t>(images.size());
   swapchain->images = std::move(images);
   swapchain->views = std::move(views);
