@@ -310,6 +310,9 @@ TextBlob Font::shape(std::string_view text, const Direction direction,
         const std::span<const FontFeature> featureList) const {
   TextBlob blob;
 #if !defined(CORAL_GRAPHICS_HAS_HARFBUZZ)
+  // The fallback shaper has no OpenType feature machinery; refusing to pretend is better than applying
+  // a setting nowhere and reporting success.
+  (void) featureList;
   std::vector<Glyph> glyphs;
   glyphs.reserve(text.size());
   for (size_t index = 0; index < text.size(); ++index) {
