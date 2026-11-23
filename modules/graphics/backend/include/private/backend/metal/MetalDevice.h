@@ -423,6 +423,7 @@ class MetalDevice final : public Device {
   Result createSwapchain(const SwapchainDescriptor& descriptor, SwapchainHandle* outSwapchain) override;
   void destroySwapchain(SwapchainHandle swapchain) override;
   Result beginFrame(SwapchainHandle swapchain, SwapchainInfo* outInfo, SemaphoreHandle signalSemaphore) override;
+  Result beginFrameWithDrawable(SwapchainHandle swapchain, void* nativeDrawable, SwapchainInfo* outInfo) override;
   Result tryBeginFrame(SwapchainHandle swapchain, SwapchainInfo* outInfo) override;
   Result endFrame(SwapchainHandle swapchain) override;
   Result endFrame(SwapchainHandle swapchain, SemaphoreHandle waitSemaphore) override;

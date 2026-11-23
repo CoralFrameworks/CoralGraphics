@@ -567,11 +567,32 @@ else ()
   target_sources(${TARGET} PRIVATE src/lottie/LottieParserUnavailable.cpp)
 endif ()
 
-# CoreVideo provides CVDisplayLink, the macOS display-blank source for FrameClock. It is a macOS-only
-# framework; iOS uses CADisplayLink and has no CVDisplayLink, so a cross build does not name it.
-if (APPLE AND NOT CMAKE_SYSTEM_NAME STREQUAL "iOS")
-  find_library(COREVIDEO_FRAMEWORK CoreVideo REQUIRED)
-  target_link_libraries(${TARGET} PRIVATE $<BUILD_INTERFACE:${COREVIDEO_FRAMEWORK}>)
+# CADisplayLink is the display tick on both Apple platforms, and CAMetalDisplayLink is the Metal
+# presentation driver. Both live in QuartzCore; the macOS tick also needs AppKit to ask a screen or a
+# view for its link. The Objective-C++ sources are added here rather than to SRCS because they are
+# Apple-only and a non-Apple configure must not try to compile them.
+if (APPLE)
+  target_sources(${TARGET} PRIVATE
+      src/gpu/FrameClockApple.mm
+      src/gpu/MetalDisplayLink.mm)
+  # The two Apple files own Objective-C objects (CADisplayLink, CAMetalDisplayLink, the delegate).
+  # ARC is per source in this tree, as it is for the Metal backend, so the flag is attached to these
+  # files rather than to the target.
+  set_source_files_properties(
+      src/gpu/FrameClockApple.mm
+      src/gpu/MetalDisplayLink.mm
+      PROPERTIES COMPILE_OPTIONS "-fobjc-arc")
+  find_library(QUARTZCORE_FRAMEWORK QuartzCore REQUIRED)
+  find_library(FOUNDATION_FRAMEWORK Foundation REQUIRED)
+  find_library(METAL_FRAMEWORK Metal REQUIRED)
+  target_link_libraries(${TARGET} PRIVATE
+      $<BUILD_INTERFACE:${QUARTZCORE_FRAMEWORK}>
+      $<BUILD_INTERFACE:${FOUNDATION_FRAMEWORK}>
+      $<BUILD_INTERFACE:${METAL_FRAMEWORK}>)
+  if (NOT CMAKE_SYSTEM_NAME STREQUAL "iOS")
+    find_library(APPKIT_FRAMEWORK AppKit REQUIRED)
+    target_link_libraries(${TARGET} PRIVATE $<BUILD_INTERFACE:${APPKIT_FRAMEWORK}>)
+  endif ()
 endif ()
 
 # ==================================================================================================

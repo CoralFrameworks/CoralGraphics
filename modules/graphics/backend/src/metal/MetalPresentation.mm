@@ -247,6 +247,58 @@ Result MetalDevice::beginFrame(const SwapchainHandle swapchainHandle, SwapchainI
   return Result::Success;
 }
 
+Result MetalDevice::beginFrameWithDrawable(const SwapchainHandle swapchainHandle, void* nativeDrawable,
+        SwapchainInfo* outInfo) {
+  MetalSwapchain* swapchain = mSwapchains.get(swapchainHandle);
+  if (swapchain == nullptr) return Result::InvalidHandle;
+  if (swapchain->frameAcquired) {
+    emitMessage(MessageSeverity::Error, "beginFrameWithDrawable was called while a frame is already acquired");
+    return Result::InvalidArgument;
+  }
+  if (nativeDrawable == nullptr) {
+    emitMessage(MessageSeverity::Error, "beginFrameWithDrawable needs an id<CAMetalDrawable>");
+    return Result::InvalidArgument;
+  }
+  id<CAMetalDrawable> drawable = (__bridge id<CAMetalDrawable>)nativeDrawable;
+  if (drawable == nil || drawable.texture == nil) {
+    emitMessage(MessageSeverity::Error, "the display link's drawable has no texture");
+    return Result::InvalidArgument;
+  }
+  if (drawable.texture.pixelFormat != swapchain->mtlFormat) {
+    // The drawable comes from the same layer, so this should agree; a mismatch means the layer was
+    // reconfigured behind the swapchain's back. Refusing is better than rendering into a format the
+    // window pipelines were not built for.
+    emitMessage(MessageSeverity::Error,
+            "the display link's drawable format does not match the swapchain's; the layer was reconfigured");
+    return Result::InvalidArgument;
+  }
+
+  swapchain->drawable = drawable;
+  swapchain->frameAcquired = true;
+  swapchain->outOfDate = false;
+  swapchain->width = static_cast<uint32_t>(drawable.texture.width);
+  swapchain->height = static_cast<uint32_t>(drawable.texture.height);
+  mCurrentFrameSwapchain = swapchain;
+
+  // There is no acquire command to wait on: the display link already owns the drawable. The caller's
+  // render submission therefore has no acquire semaphore, which is why this overload takes none.
+  if (outInfo != nullptr) {
+    SwapchainInfo info;
+    info.width = swapchain->width;
+    info.height = swapchain->height;
+    info.format = swapchain->format;
+    info.imageCount = swapchain->imageCount;
+    info.presentMode = swapchain->presentMode;
+    info.currentImageIndex = 0;
+    info.currentImage = TextureHandle::invalid();
+    info.currentRenderPass = RenderPassHandle::invalid();
+    info.srgb = swapchain->srgb;
+    info.colorSpace = SwapchainColorSpace::Srgb;
+    *outInfo = info;
+  }
+  return Result::Success;
+}
+
 Result MetalDevice::tryBeginFrame(const SwapchainHandle swapchain, SwapchainInfo* outInfo) {
   // CAMetalLayer has no non-blocking acquire: `nextDrawable` waits for the pool and a nil result is a timeout, not
   // "try again next frame". Reporting the blocking behaviour rather than inventing a different contract is what the

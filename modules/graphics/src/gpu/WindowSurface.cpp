@@ -76,6 +76,14 @@ struct WindowSurface::Impl {
   /** Command buffers the last present produced; a plan frame lends several lists, one each today. */
   uint32_t lastSubmitCount = 0;
   backend::PresentMode presentMode = backend::PresentMode::Fifo;
+  /**
+   * True when this frame's drawable came from a display link rather than from `beginFrame`.
+   *
+   * The acquire semaphore must not be waited on such a frame: no acquire command ran, because the
+   * drawable was already handed over. Waiting on a semaphore nobody signalled would block the first
+   * frame forever -- the failure this flag exists to make impossible.
+   */
+  bool displayLinkFrame = false;
   /** True when the targets carry PQ numbers; drives the presentation pass and every recreated target. */
   bool pqOutput = false;
   /** The colour space the swapchain was created with; `Srgb` on every path the canvas supports. */
@@ -84,6 +92,11 @@ struct WindowSurface::Impl {
   /** True when this device adopted a share context from its group. */
   bool sharedWithGroup = false;
   std::string diagnostics;
+
+  /** The semaphore a submission must wait on, or an invalid one when the frame was display-link driven. */
+  [[nodiscard]] backend::SemaphoreHandle acquireWait() const noexcept {
+    return displayLinkFrame ? backend::SemaphoreHandle::invalid() : acquireSemaphore;
+  }
 };
 
 WindowSurface::WindowSurface() : mImpl(std::make_unique<Impl>()) {}
@@ -387,6 +400,14 @@ WindowSurface::RenderTargetView WindowSurface::renderTarget() const noexcept {
 }
 
 graphics::Canvas* WindowSurface::beginFrame() {
+  return beginFrameImpl(nullptr);
+}
+
+graphics::Canvas* WindowSurface::beginFrame(void* nativeDrawable) {
+  return beginFrameImpl(nativeDrawable);
+}
+
+graphics::Canvas* WindowSurface::beginFrameImpl(void* nativeDrawable) {
   if (mImpl == nullptr || mImpl->context == nullptr) return nullptr;
   if (mImpl->frameOpen) {
     MINILOG_WARN("[graphics/gpu/window-surface] beginFrame called twice without a present in between");
@@ -413,13 +434,30 @@ graphics::Canvas* WindowSurface::beginFrame() {
   }
 
   backend::SwapchainInfo info;
-  backend::Result acquired = mImpl->device->beginFrame(mImpl->swapchain, &info, mImpl->acquireSemaphore);
-  if (acquired == backend::Result::OutOfDate) {
-    // The swapchain is stale (window resize, mode change, surface loss). Rebuild it at the size the
-    // surface already knows, then acquire once more; this is the one place the caller should not have
-    // to know about OutOfDate.
-    if (!resize(mImpl->width, mImpl->height)) return nullptr;
+  backend::Result acquired = backend::Result::Success;
+  if (nativeDrawable != nullptr) {
+    // A display link already owns the drawable, so there is nothing to acquire and no acquire
+    // semaphore to signal. The overload is requested explicitly: a backend without it reports
+    // Unsupported rather than silently acquiring a second drawable.
+    mImpl->displayLinkFrame = true;
+    acquired = mImpl->device->beginFrameWithDrawable(mImpl->swapchain, nativeDrawable, &info);
+    if (acquired == backend::Result::OutOfDate) {
+      // A drawable from the display link cannot be re-acquired; the link itself is stale. Resizing the
+      // swapchain would not replace the drawable, so this is reported rather than retried.
+      mImpl->diagnostics = "the display link's drawable is out of date";
+      mImpl->displayLinkFrame = false;
+      return nullptr;
+    }
+  } else {
+    mImpl->displayLinkFrame = false;
     acquired = mImpl->device->beginFrame(mImpl->swapchain, &info, mImpl->acquireSemaphore);
+    if (acquired == backend::Result::OutOfDate) {
+      // The swapchain is stale (window resize, mode change, surface loss). Rebuild it at the size the
+      // surface already knows, then acquire once more; this is the one place the caller should not have
+      // to know about OutOfDate.
+      if (!resize(mImpl->width, mImpl->height)) return nullptr;
+      acquired = mImpl->device->beginFrame(mImpl->swapchain, &info, mImpl->acquireSemaphore);
+    }
   }
   if (!backend::isSuccess(acquired)) {
     mImpl->diagnostics = "the swapchain could not hand over a frame (result " +
@@ -530,7 +568,7 @@ bool WindowSurface::blitToSwapchain(bool waitAcquire) {
 
   const backend::Result submitted = mImpl->context->submit(blit,
     mImpl->targets[mImpl->activeTarget], {}, backend::LoadOp::Clear,
-    waitAcquire ? mImpl->acquireSemaphore : backend::SemaphoreHandle::invalid(),
+    waitAcquire ? mImpl->acquireWait() : backend::SemaphoreHandle::invalid(),
     mImpl->renderFinishedSemaphore);
   if (!backend::isSuccess(submitted)) {
     mImpl->diagnostics = "the window blit could not be submitted";
@@ -562,7 +600,7 @@ bool WindowSurface::present() {
     // The UI pass renders into the persistent target and waits for the acquire; the blit that follows
     // is ordered after it on the queue and signals present.
     const backend::Result submitted = mImpl->context->submit(*mImpl->recording, mImpl->uiTarget,
-            images, backend::LoadOp::Clear, mImpl->acquireSemaphore,
+            images, backend::LoadOp::Clear, mImpl->acquireWait(),
             backend::SemaphoreHandle::invalid());
     if (!backend::isSuccess(submitted)) {
       mImpl->diagnostics = "the frame could not be rendered into the window";
@@ -601,6 +639,7 @@ bool WindowSurface::presentRetained() {
   if (mImpl->group != nullptr) mImpl->group->drainDeferredReleases(mImpl->device);
 
   backend::SwapchainInfo info;
+  mImpl->displayLinkFrame = false;
   backend::Result acquired = mImpl->device->beginFrame(mImpl->swapchain, &info, mImpl->acquireSemaphore);
   if (acquired == backend::Result::OutOfDate) {
     if (!resize(mImpl->width, mImpl->height)) return false;
@@ -754,6 +793,7 @@ bool WindowSurface::presentRecordingsImpl(const std::vector<const DrawList*>& li
     mImpl->recording.reset();
 
     backend::SwapchainInfo info;
+    mImpl->displayLinkFrame = false;
     backend::Result acquired = mImpl->device->beginFrame(mImpl->swapchain, &info, mImpl->acquireSemaphore);
     if (acquired == backend::Result::OutOfDate) {
       if (!resize(mImpl->width, mImpl->height)) return false;
@@ -824,7 +864,7 @@ bool WindowSurface::presentRecordingsImpl(const std::vector<const DrawList*>& li
     const std::vector<Bitmap> images = recordedImages(entry);
     const backend::Result submitted = mImpl->context->submit(*entry, mImpl->target, images,
       first ? rootLoad : backend::LoadOp::Load,
-      first ? mImpl->acquireSemaphore : backend::SemaphoreHandle::invalid(),
+      first ? mImpl->acquireWait() : backend::SemaphoreHandle::invalid(),
       backend::SemaphoreHandle::invalid(), clip, translation, continueFrame);
     if (!backend::isSuccess(submitted)) {
       mImpl->diagnostics = "the recorded UI frame could not be rendered";
@@ -863,7 +903,7 @@ bool WindowSurface::presentDamage(const Rect& damage) {
   mImpl->context->selectFrameSlot(mImpl->activeTarget);
   const std::vector<Bitmap> images = recordedImages(mImpl->recording.get());
   const backend::Result submitted = mImpl->context->submit(*mImpl->recording, mImpl->uiTarget,
-    images, backend::LoadOp::Load, mImpl->acquireSemaphore, backend::SemaphoreHandle::invalid(),
+    images, backend::LoadOp::Load, mImpl->acquireWait(), backend::SemaphoreHandle::invalid(),
     damage);
   if (!backend::isSuccess(submitted)) {
     mImpl->diagnostics = "the damaged frame could not be rendered";

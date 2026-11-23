@@ -963,6 +963,29 @@ class Device {
    */
   virtual Result beginFrame(SwapchainHandle swapchain, SwapchainInfo* outInfo, SemaphoreHandle signalSemaphore) = 0;
 
+  /**
+   * Begins the frame with a drawable the caller already owns.
+   *
+   * `CAMetalDisplayLink` hands its delegate a `CAMetalDrawable` at the display's target presentation
+   * time. Acquiring a second drawable from the layer would either block until the display link's
+   * drawable is presented or present two images for one tick, so the Metal backend accepts the one the
+   * display link supplied through this call.
+   *
+   * @p nativeDrawable is a backend-owned object: `id<CAMetalDrawable>` on Metal. It is **borrowed** for
+   * the frame and presented by `endFrame`, which is the same lifetime rule `beginFrame` gives the
+   * layer-owned drawable.
+   *
+   * Default: unsupported. A backend whose presentation is not driven by an external display link has
+   * no use for it, and returning Unsupported is what keeps the absent path from looking like a
+   * successful one.
+   */
+  virtual Result beginFrameWithDrawable(SwapchainHandle swapchain, void* nativeDrawable, SwapchainInfo* outInfo) {
+    (void) swapchain;
+    (void) nativeDrawable;
+    (void) outInfo;
+    return Result::Unsupported;
+  }
+
   /** Acquires a direct-render target for the current swapchain image. Default: unsupported. */
   virtual Result acquireSwapchainTarget(SwapchainHandle swapchain, SwapchainTargetHandle* outTarget,
           SwapchainTargetInfo* outInfo) {

@@ -276,6 +276,27 @@ class WindowSurface final {
   [[nodiscard]] graphics::Canvas* beginFrame();
 
   /**
+   * Opens a frame on a drawable a display link already handed out.
+   *
+   * ## Why this exists next to `beginFrame`
+   *
+   * `CAMetalDisplayLink` owns the display timing: its delegate receives a `CAMetalDrawable` together
+   * with the target presentation timestamp, and the delegate is expected to render into **that**
+   * drawable. Calling `beginFrame()` there would ask the layer for a second drawable, which either
+   * blocks until the first is presented or presents two images for one tick. This overload makes the
+   * display link's drawable the frame's target instead.
+   *
+   * @param nativeDrawable the display link's `id<CAMetalDrawable>`. Borrowed: `present()` presents it,
+   *        and the display link recycles it afterwards. Only the Metal backend implements this; another
+   *        backend returns null with `diagnostics()` naming the reason.
+   *
+   * The call is thread-affine in the same way `beginFrame` is: call it on the thread that owns this
+   * surface, which for a display-link-driven loop is the display link's own thread. See
+   * `gpu::MetalDisplayLink`.
+   */
+  [[nodiscard]] graphics::Canvas* beginFrame(void* nativeDrawable);
+
+  /**
    * Draws a texture another producer owns, between the canvas's own draws.
    *
    * Same contract as `Surface::drawExternalImage`: the view is borrowed for the frame, and the command is
@@ -397,6 +418,9 @@ class WindowSurface final {
 
  private:
   WindowSurface();
+
+  /** The shared body of the two `beginFrame` overloads; a null drawable acquires one from the swapchain. */
+  graphics::Canvas* beginFrameImpl(void* nativeDrawable);
 
   bool presentRecordingImpl(const DrawList& list, const Rect* damage = nullptr);
 
