@@ -58,6 +58,7 @@
 
 #include <gtest/gtest.h>
 
+#include <array>
 #include <cmath>
 #include <cstdlib>
 #include <memory>
@@ -611,6 +612,164 @@ TEST(CanvasTest, AStrokedRectangleLeavesItsInteriorEmpty) {
   //
   // EXPECT_EQ(fixture.redAt(8, 8), 0u) << "the middle of a stroked rectangle is empty";
   EXPECT_EQ(fixture.redAt(15, 15), 0u) << "the far corner, well outside the stroke, is untouched";
+}
+
+// ==================================================================================================
+// Stroke geometry: open contours, joins, caps
+// ==================================================================================================
+//
+// The outline is a union of overlapping pieces rasterised with the nonzero rule, so two properties decide whether it
+// comes out as a stroke or as a mess. The closing edge of an *open* contour must not be invented, and every piece must
+// wind the same way or the overlaps cancel instead of adding. Both are asserted here by pixel, because both defects
+// looked plausible in the numbers and were invisible in the two-point-line case.
+
+TEST(CanvasTest, AnOpenPolylineIsNotClosedByItsStroke) {
+  Fixture fixture;
+  ASSERT_NE(fixture.canvas, nullptr);
+
+  // An L: (2,2) -> (12,2) -> (12,12). Stroking it must cover the two arms and nothing else. The defect this pins down
+  // appended an edge from (12,12) back to (2,2), which fills a diagonal band straight through the empty middle.
+  Path path;
+  path.moveTo({ 2.0f, 2.0f });
+  path.lineTo({ 12.0f, 2.0f });
+  path.lineTo({ 12.0f, 12.0f });
+
+  Paint paint;
+  paint.color = Color::Red();
+  paint.style = Paint::Style::kStroke;
+  paint.strokeWidth = 2.0f;
+  fixture.canvas->drawPath(path, paint);
+
+  EXPECT_EQ(fixture.alphaAt(7, 2), 255u) << "the horizontal arm";
+  EXPECT_EQ(fixture.alphaAt(12, 7), 255u) << "the vertical arm";
+  EXPECT_EQ(fixture.alphaAt(6, 6), 0u) << "the middle is empty; a phantom closing edge would ink the diagonal";
+  EXPECT_EQ(fixture.alphaAt(8, 8), 0u) << "and so is the rest of the diagonal toward the last point";
+}
+
+TEST(CanvasTest, AContourThatReturnsToItsStartKeepsItsClosingEdge) {
+  Fixture fixture;
+  ASSERT_NE(fixture.canvas, nullptr);
+
+  // The same square as above, but closed by writing the return as a fourth `lineTo` instead of a `close` verb. The
+  // duplicate final point is dropped during flattening, so without recording that the return happened the stroker sees
+  // an open three-edge polyline and the left edge disappears.
+  Path path;
+  path.moveTo({ 4.0f, 4.0f });
+  path.lineTo({ 12.0f, 4.0f });
+  path.lineTo({ 12.0f, 12.0f });
+  path.lineTo({ 4.0f, 12.0f });
+  path.lineTo({ 4.0f, 4.0f });
+
+  Paint paint;
+  paint.color = Color::Red();
+  paint.style = Paint::Style::kStroke;
+  paint.strokeWidth = 4.0f;
+  fixture.canvas->drawPath(path, paint);
+
+  EXPECT_EQ(fixture.alphaAt(4, 8), 255u) << "the closing edge, written as a line, is still part of the outline";
+  EXPECT_EQ(fixture.alphaAt(8, 4), 255u) << "and the first edge";
+  EXPECT_EQ(fixture.alphaAt(8, 12), 255u) << "and the last one";
+}
+
+TEST(CanvasTest, AClosedContourJoinsItsCornersWithoutHoles) {
+  Fixture fixture;
+  ASSERT_NE(fixture.canvas, nullptr);
+
+  Paint paint;
+  paint.color = Color::Red();
+  paint.style = Paint::Style::kStroke;
+  paint.strokeWidth = 4.0f;
+  // The default join is a miter, so the outside of each corner is square. The pixels beside the inner corner are the
+  // ones a join piece of the opposite winding used to hollow out.
+  fixture.canvas->drawRectStroke(Rect::MakeLTRB(4.0f, 4.0f, 12.0f, 12.0f), paint);
+
+  EXPECT_EQ(fixture.alphaAt(3, 3), 255u) << "the outer corner of the miter";
+  EXPECT_EQ(fixture.alphaAt(4, 3), 255u) << "and the band beside it, which a cancelled join left transparent";
+  EXPECT_EQ(fixture.alphaAt(3, 4), 255u) << "the same on the other side of the corner";
+  EXPECT_EQ(fixture.alphaAt(7, 7), 0u) << "the interior stays empty";
+}
+
+TEST(CanvasTest, AStrokedCircleIsASolidRing) {
+  Fixture fixture;
+  ASSERT_NE(fixture.canvas, nullptr);
+
+  // A stroked circle is a join at every flattened vertex, so it is the shape that shows an orientation mismatch most
+  // clearly: with the join pieces wound against the edge quads, the ring came out as a faint dashed outline.
+  Paint paint;
+  paint.color = Color::Red();
+  paint.style = Paint::Style::kStroke;
+  paint.strokeWidth = 3.0f;
+  paint.strokeJoin = Paint::Join::kRound;
+  fixture.canvas->drawCircle(8.0f, 8.0f, 5.0f, paint);
+
+  EXPECT_EQ(fixture.alphaAt(8, 3), 255u) << "the top of the ring is fully covered";
+  EXPECT_EQ(fixture.alphaAt(13, 8), 255u) << "and the right of it";
+  EXPECT_EQ(fixture.alphaAt(8, 8), 0u) << "the middle of the circle is not filled";
+  EXPECT_EQ(fixture.alphaAt(8, 0), 0u) << "and the ring does not reach a pixel beyond it";
+}
+
+TEST(CanvasTest, AStrokeHonoursItsCap) {
+  // The line runs from x = 4 to x = 12 at y = 8, four units wide. `beyond` is the pixel immediately before the start;
+  // `atEnd` is the pixel the endpoint itself sits on; `oneFurther` is one more pixel out, which only a square cap
+  // reaches at this width.
+  const auto alphasForCap = [](const Paint::Cap cap) {
+    Fixture fixture;
+    Paint paint;
+    paint.color = Color::Red();
+    paint.style = Paint::Style::kStroke;
+    paint.strokeWidth = 4.0f;
+    paint.strokeCap = cap;
+    fixture.canvas->drawLine(Point { 4.0f, 8.0f }, Point { 12.0f, 8.0f }, paint);
+    return std::array<uint32_t, 3> { fixture.alphaAt(3, 8), fixture.alphaAt(4, 8), fixture.alphaAt(2, 8) };
+  };
+  const auto butt = alphasForCap(Paint::Cap::kButt);
+  const auto round = alphasForCap(Paint::Cap::kRound);
+  const auto square = alphasForCap(Paint::Cap::kSquare);
+
+  EXPECT_EQ(butt[0], 0u) << "a butt cap does not extend past the endpoint";
+  EXPECT_EQ(butt[1], 255u) << "but the band itself starts there";
+  EXPECT_EQ(round[1], 255u) << "a round cap covers the same band";
+  EXPECT_GT(round[0], 0u) << "and extends beyond the endpoint";
+  EXPECT_LT(round[2], 255u) << "a circle's last pixel is only partly covered at this width";
+  EXPECT_EQ(square[0], 255u) << "a square cap extends as far as a round one";
+  EXPECT_EQ(square[2], 255u) << "and its half-width rectangle reaches one more pixel";
+}
+
+TEST(CanvasTest, AStrokeHonoursItsJoin) {
+  const auto cornerAlpha = [](const Paint::Join join) {
+    Fixture fixture;
+    Paint paint;
+    paint.color = Color::Red();
+    paint.style = Paint::Style::kStroke;
+    paint.strokeWidth = 4.0f;
+    paint.strokeJoin = join;
+    fixture.canvas->drawRectStroke(Rect::MakeLTRB(4.0f, 4.0f, 12.0f, 12.0f), paint);
+    return fixture.alphaAt(2, 2);
+  };
+
+  EXPECT_EQ(cornerAlpha(Paint::Join::kMiter), 255u) << "a miter fills the square corner";
+  EXPECT_EQ(cornerAlpha(Paint::Join::kBevel), 0u) << "a bevel cuts it off";
+}
+
+TEST(CanvasTest, AnEvenOddStrokeIsStillFilled) {
+  Fixture fixture;
+  ASSERT_NE(fixture.canvas, nullptr);
+
+  // The path's fill rule describes how to fill the path, not its stroke outline. The outline is a union of overlapping
+  // pieces, and under even-odd the union subtracts by parity -- a two-point line's quad is emitted twice, so the whole
+  // stroke would vanish.
+  Path path;
+  path.setFillType(FillType::EvenOdd);
+  path.moveTo({ 1.0f, 4.0f });
+  path.lineTo({ 14.0f, 4.0f });
+
+  Paint paint;
+  paint.color = Color::Red();
+  paint.style = Paint::Style::kStroke;
+  paint.strokeWidth = 2.0f;
+  fixture.canvas->drawPath(path, paint);
+
+  EXPECT_EQ(fixture.alphaAt(7, 4), 255u) << "the stroke is nonzero even though the path is even-odd";
 }
 
 // ==================================================================================================
@@ -1297,7 +1456,11 @@ TEST(CanvasShapes, ALineIsStrokedBetweenItsPoints) {
 
   EXPECT_EQ(fixture.redAt(7, 4), 255u) << "a point on the segment";
   EXPECT_EQ(fixture.redAt(1, 4), 255u) << "its first endpoint";
-  EXPECT_EQ(fixture.redAt(14, 4), 255u) << "its last endpoint";
+  // A butt cap is the default and ends *on* the last point, so the band is [1, 14): the pixel whose square starts at
+  // x = 14 is past it. This used to read 255 because every stroke was given round caps whether or not the paint asked
+  // for them; the cap tests below are the ones that pin the extension.
+  EXPECT_EQ(fixture.redAt(13, 4), 255u) << "the last pixel the band covers";
+  EXPECT_EQ(fixture.redAt(14, 4), 0u) << "a butt cap ends exactly on the final point, not half a width past it";
   EXPECT_EQ(fixture.redAt(7, 8), 0u) << "a point well off it";
 }
 

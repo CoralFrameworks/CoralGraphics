@@ -426,12 +426,11 @@ TEST(LottieTrim, ATrimmedStrokeIsShorterThanTheUntrimmedOne) {
 
   EXPECT_NEAR(whole.coveredPixels(), 100 * 20, 60) << "the whole band";
 
-  // The half-length is compared against *half of the whole* rather than against 1,000, because a trimmed stroke has a
-  // free end where an untrimmed one has only the two at the surface edge. This library's default cap extends half the
-  // stroke width past the last point, so the trimmed end adds about `20/2 * 20 = 200` pixels that the band alone does
-  // not account for -- measured at 166, which is that figure within the antialiasing at the cap.
+  // The half-length is compared against *half of the whole* rather than against 1,000. The stroke's default cap is
+  // butt -- the format's `lc` default, and what a paint that never set a cap asks for -- so the free end the trim
+  // creates ends exactly at the cut and adds no ink. The tolerance is the antialiasing at both ends, not a cap.
   EXPECT_NEAR(half.coveredPixels(), whole.coveredPixels() / 2, 250)
-          << "about half the ink, plus the cap on the end the trim created";
+          << "about half the ink; a butt cap adds nothing at the cut";
   EXPECT_LT(half.coveredPixels(), whole.coveredPixels()) << "and strictly less than the whole";
 }
 
@@ -486,12 +485,13 @@ TEST(LottieTrim, TheTwoModesDifferOnASecondShape) {
   EXPECT_EQ(joined.alpha(25, 70), 0) << "and nothing of the second line at all";
   EXPECT_EQ(joined.alpha(75, 70), 0);
 
-  // The totals are *not* equal, and the reason is the caps rather than the trim. Trimming each line apart leaves four
-  // free ends and joining them leaves two, so the difference is exactly twice one cap -- measured at 332 against the 166
-  // above, which is the same figure once more. The length of ink is what matches; the caps are what does not, and
-  // asserting equality here was asserting something the format does not do.
-  EXPECT_NEAR(apart.coveredPixels() - joined.coveredPixels(), 332, 120)
-          << "two extra free ends, so about two caps' worth more ink";
+  // The totals are equal, and that is the *correct* result with the format's default butt cap: `apart` draws two bands
+  // of 50 x 20 and `joined` draws one of 100 x 20, and a butt cap stops exactly at a free end. The previous version of
+  // this assertion expected a difference of about 332 pixels, which was two round caps' worth of ink -- but that ink
+  // came from the renderer forcing round caps on every stroke, not from the document, which never asked for them. The
+  // modes are distinguished by *where* the ink is, which is what the assertions above check.
+  EXPECT_NEAR(static_cast<double>(apart.coveredPixels()), static_cast<double>(joined.coveredPixels()), 200)
+          << "the two modes ink the same area when the caps are butt";
 }
 
 TEST(LottieTrim, DrawsTheTrimFillAsset) {

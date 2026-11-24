@@ -770,11 +770,17 @@ void Canvas::drawPath(const Path& path, const Paint& paint) {
   const auto* devicePathOps = static_cast<const pathops::Path*>(devicePath.pathOpsHandle());
   if (devicePathOps == nullptr) return;
 
+  // A stroke's outline is a union of overlapping pieces and therefore always nonzero, whatever fill rule the path
+  // carries: the rule answers how to fill the path, and the stroke is not that path. Every backend repeats this clamp
+  // for a caller that reaches `CanvasBackend::drawPath` directly; doing it here as well means a recorded list already
+  // says what it means rather than relying on the renderer to reinterpret it.
+  const FillType fillType = paint.style == Paint::Style::kStroke ? FillType::Winding : path.fillType();
+
   // The transform goes with the contours because a shader is sampled in the space the geometry came *from*: the backend
   // has the device-space shape, and only the canvas knows the matrix that would put a gradient's own coordinates back
   // where the caller wrote them. It is handed over inverted -- device back to caller -- because that is the direction a
   // sampler needs, and taking the inverse here rather than there keeps the one transform stack in one place.
-  mImpl->backend->drawPath(*devicePathOps, path.fillType(), scale, state.transform.invert(), paint);
+  mImpl->backend->drawPath(*devicePathOps, fillType, scale, state.transform.invert(), paint);
 }
 
 void Canvas::drawImage(const Image& image, const Scalar x, const Scalar y, const Paint& paint) {

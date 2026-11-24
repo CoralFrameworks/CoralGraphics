@@ -95,7 +95,13 @@ void subdivideQuadratic(const Point& p0, const Point& p1, const Point& p2, const
   subdivideQuadratic(p012, p12, p2, depth + 1, out, tolerance);
 }
 
-/** Appends a closed half-disc of radius @p radius about @p centre, as a polygon. */
+/**
+ * Appends a closed disc of radius @p radius about @p centre, as a polygon.
+ *
+ * The point order is whatever the angle sweep produces; `StrokeOutline::append` is what guarantees that the disc winds
+ * the same way as the edge quads it is unioned with. Used for both a round join and a round cap, which are the same
+ * piece of geometry.
+ */
 void appendDisc(const Point& centre, const Scalar radius, std::vector<Point>& out) {
   // The segment count follows the radius so that a large join is smooth and a small one does not pay for
   // detail it cannot show. Bounded at both ends: below six the join is visibly a polygon, and above the
@@ -117,6 +123,207 @@ Point direction(const Point& from, const Point& to) noexcept {
   const Scalar length = std::sqrt(dx * dx + dy * dy);
   if (!(length > 0.0f)) return Point{ 0.0f, 0.0f };
   return Point{ dx / length, dy / length };
+}
+
+} // namespace anonymous
+
+namespace {
+
+/**
+ * Pieces below this twice-area contribute no pixel and are dropped.
+ *
+ * A collinear piece has exactly zero area, but a piece produced by an almost-degenerate turn can have an area that is
+ * merely tiny. Both cover nothing visible, and dropping them keeps the degenerate-turn arithmetic out of the contour
+ * list. The threshold is on twice the signed area, so it is in squared caller units; 1e-12 is far below a pixel at any
+ * sane scale and far above what floating-point cancellation produces.
+ */
+constexpr Scalar kDegeneratePieceArea = 1e-12f;
+
+/** @return twice the signed area of a closed polygon through @p points. */
+Scalar signedAreaTwice(const std::vector<Point>& points) noexcept {
+  Scalar sum = 0.0f;
+  for (size_t i = 0; i < points.size(); ++i) {
+    const Point& a = points[i];
+    const Point& b = points[(i + 1) % points.size()];
+    sum += a.x * b.y - b.x * a.y;
+  }
+  return sum;
+}
+
+/** @return the squared distance between two points. */
+Scalar distanceSquared(const Point& a, const Point& b) noexcept {
+  const Scalar dx = b.x - a.x;
+  const Scalar dy = b.y - a.y;
+  return dx * dx + dy * dy;
+}
+
+/**
+ * The accumulator for a stroke's pieces.
+ *
+ * ## Why orientation is normalised here rather than reasoned about per piece
+ *
+ * The pieces are built by three different helpers with three different natural point orders, and the one thing that
+ * must hold is that they all agree: the nonzero fill unions windings of the same sign and cancels them of opposite
+ * sign. Rather than deriving the correct order for each helper -- and getting it wrong once, which is exactly the
+ * defect this replaces -- every piece is passed through `append`, which reverses the point order whenever the signed
+ * area is positive. All pieces therefore come out with the same (negative) signed area, whatever order they were
+ * built in, and the union is a union by construction.
+ */
+class StrokeOutline {
+public:
+  /** Appends @p points as one closed contour, or drops it when it has no area. */
+  void append(std::vector<Point> points) {
+    if (points.size() < 3) return;
+
+    const Scalar area = signedAreaTwice(points);
+    if (!std::isfinite(area) || std::abs(area) <= kDegeneratePieceArea) return;
+    if (area > 0.0f) std::reverse(points.begin(), points.end());
+
+    Contour contour;
+    contour.points = std::move(points);
+    contour.closed = true;
+    mContours.push_back(std::move(contour));
+  }
+
+  [[nodiscard]] std::vector<Contour> take() && { return std::move(mContours); }
+
+private:
+  std::vector<Contour> mContours;
+};
+
+/**
+ * Appends the quad covering one edge of the stroke.
+ *
+ * The quad is centred on the segment and reaches half a width to either side. Its orientation is whatever the formula
+ * produces; `StrokeOutline::append` normalises it with every other piece.
+ */
+void appendEdgeQuad(const Point& a, const Point& b, const Scalar half, StrokeOutline& out) {
+  const Point directionOfEdge = direction(a, b);
+  if (directionOfEdge.x == 0.0f && directionOfEdge.y == 0.0f) return; // a zero-length edge has no direction to offset
+
+  // The perpendicular, scaled to half the width.
+  const Scalar ox = -directionOfEdge.y * half;
+  const Scalar oy = directionOfEdge.x * half;
+
+  out.append({
+    Point{ a.x + ox, a.y + oy },
+    Point{ b.x + ox, b.y + oy },
+    Point{ b.x - ox, b.y - oy },
+    Point{ a.x - ox, a.y - oy },
+  });
+}
+
+/** Appends the circular piece a round cap or a round join is made of. */
+void appendRoundPiece(const Point& centre, const Scalar radius, StrokeOutline& out) {
+  std::vector<Point> disc;
+  appendDisc(centre, radius, disc);
+  out.append(std::move(disc));
+}
+
+/**
+ * Appends the piece that finishes one end of an open contour.
+ *
+ * @param end the end point.
+ * @param edgeDirection the unit direction of the edge the cap belongs to, pointing *along* the contour.
+ * @param atStart true for the first point, whose cap extends backwards along @p edgeDirection, false for the last,
+ *                whose cap extends forwards.
+ *
+ * A butt cap appends nothing: the edge quad already ends exactly at the point, which is the definition of a butt cap.
+ * A square cap appends the half-width rectangle past the end. A round cap appends a disc, which overlaps the edge
+ * quad and covers the semicircle beyond it -- the same disc a round join uses, because the geometry is identical.
+ */
+void appendCap(const Point& end, const Point& edgeDirection, const bool atStart, const Scalar half,
+        const StrokeCap cap, StrokeOutline& out) {
+  if (cap == StrokeCap::kButt) return;
+  if (edgeDirection.x == 0.0f && edgeDirection.y == 0.0f) return;
+
+  if (cap == StrokeCap::kRound) {
+    appendRoundPiece(end, half, out);
+    return;
+  }
+
+  // Square: the band's own cross-section, pushed half a width past the end.
+  const Scalar ox = -edgeDirection.y * half;
+  const Scalar oy = edgeDirection.x * half;
+  const Scalar extension = atStart ? -half : half;
+  const Scalar sx = edgeDirection.x * extension;
+  const Scalar sy = edgeDirection.y * extension;
+  out.append({
+    Point{ end.x + ox, end.y + oy },
+    Point{ end.x - ox, end.y - oy },
+    Point{ end.x - ox + sx, end.y - oy + sy },
+    Point{ end.x + ox + sx, end.y + oy + sy },
+  });
+}
+
+/**
+ * Appends the piece that fills the outside of the corner at @p at.
+ *
+ * ## Which side is outside
+ *
+ * The two edge quads reach up to @p at and stop; on the side the path turns *towards* they overlap, so the union is
+ * already solid there. On the other side they diverge and leave a wedge, and that wedge is what this fills. The turn's
+ * sign -- the cross product of the incoming and outgoing directions -- says which side that is, and it is the same
+ * rule for a convex and a concave vertex of the path: what matters is which way the path turns, not which side its
+ * interior happens to be on.
+ *
+ * @param prev the previous point, which defines the incoming direction.
+ * @param at the corner.
+ * @param next the next point, which defines the outgoing direction.
+ */
+void appendJoin(const Point& prev, const Point& at, const Point& next, const Scalar half,
+        const StrokeJoin join, const Scalar miterLimit, StrokeOutline& out) {
+  const Point incoming = direction(prev, at);
+  const Point outgoing = direction(at, next);
+  if ((incoming.x == 0.0f && incoming.y == 0.0f) || (outgoing.x == 0.0f && outgoing.y == 0.0f)) return;
+
+  const Scalar cross = incoming.x * outgoing.y - incoming.y * outgoing.x;
+  const Scalar dot = incoming.x * outgoing.x + incoming.y * outgoing.y;
+  // A straight continuation needs nothing: the two quads already meet exactly. The dot check keeps a literal reversal
+  // (cross zero, dot negative) in the piece-producing path below, where it needs a bevel rather than nothing.
+  if (cross == 0.0f && dot > 0.0f) return;
+
+  // The outer side is the one the path turns away from. With the perpendicular taken as (-y, x), a positive cross
+  // turns towards that perpendicular's side, so the outside is the other sign.
+  const Scalar side = cross > 0.0f ? -1.0f : 1.0f;
+  const Point incomingNormal{ -incoming.y, incoming.x };
+  const Point outgoingNormal{ -outgoing.y, outgoing.x };
+
+  const Point outerIncoming{ at.x + side * half * incomingNormal.x, at.y + side * half * incomingNormal.y };
+  const Point outerOutgoing{ at.x + side * half * outgoingNormal.x, at.y + side * half * outgoingNormal.y };
+
+  if (join == StrokeJoin::kRound) {
+    appendRoundPiece(at, half, out);
+    return;
+  }
+
+  if (join == StrokeJoin::kMiter) {
+    // The two outer normals point into the wedge. The miter tip is along their bisector, at `half / sin(half angle)`,
+    // where the half angle is measured between the normals: for a square corner the normals are perpendicular, the
+    // sine is sqrt(1/2), and the tip is sqrt(2) half-widths out, which is the corner of the square outline.
+    const Point outerIncomingUnit{ side * incomingNormal.x, side * incomingNormal.y };
+    const Point outerOutgoingUnit{ side * outgoingNormal.x, side * outgoingNormal.y };
+    const Scalar normalDot = outerIncomingUnit.x * outerOutgoingUnit.x +
+                             outerIncomingUnit.y * outerOutgoingUnit.y;
+    const Scalar sineHalfAngle = std::sqrt(std::max(0.0f, 0.5f * (1.0f + normalDot)));
+
+    const Scalar limit = std::max(1.0f, miterLimit);
+    if (sineHalfAngle > 0.0f && sineHalfAngle >= 1.0f / limit) {
+      Point bisector{ outerIncomingUnit.x + outerOutgoingUnit.x, outerIncomingUnit.y + outerOutgoingUnit.y };
+      const Scalar bisectorLength = std::sqrt(bisector.x * bisector.x + bisector.y * bisector.y);
+      if (bisectorLength > 0.0f) {
+        const Scalar tipDistance = half / sineHalfAngle;
+        const Point tip{ at.x + bisector.x / bisectorLength * tipDistance,
+          at.y + bisector.y / bisectorLength * tipDistance };
+        out.append({ at, outerIncoming, tip, outerOutgoing });
+        return;
+      }
+    }
+    // Past the miter limit the corner is bevelled, which is the same piece a bevel join uses. Falling through rather
+    // than duplicating the triangle keeps one definition of "the bevel".
+  }
+
+  out.append({ at, outerIncoming, outerOutgoing });
 }
 
 } // namespace anonymous
@@ -188,12 +395,21 @@ std::vector<Contour> flattenToPolylines(const pathops::Path& path, const Flatten
    * what the first round of stroke tests found. `flattenPath` applies the stricter rule for fills.
    */
   const auto finishContour = [&contours, &current, &start, &open, &closing]() {
+    // ## A contour that returns to its start is closed, however it was spelled
+    //
+    // A stroker must know whether the edge from the last point back to the first is real, and the `close` verb is only
+    // one way to say it: writing that edge as a final `lineTo(start)` describes the same closed shape. The duplicate
+    // final point is dropped either way, so the point list alone cannot answer, and recording only the `close` verb
+    // would make a stroker drop the last edge of every explicitly-closed contour. The flag is therefore recorded from
+    // wherever the closure actually happened.
+    const bool returnsToStart = open && current.points.size() >= 2 &&
+      current.points.back().x == start.x && current.points.back().y == start.y;
     // The closure is recorded before the move, so the contour that is stored carries it.
-    current.closed = closing;
+    current.closed = closing || returnsToStart;
     if (open && current.points.size() >= 2) {
       // A duplicated final point would be a zero-length edge. It costs a crossing test per scanline and makes the
       // contour's direction ambiguous where the two coincide, so it is dropped rather than passed on.
-      if (current.points.back().x == start.x && current.points.back().y == start.y) {
+      if (returnsToStart) {
         current.points.pop_back();
       }
       if (current.points.size() >= 2) contours.push_back(std::move(current));
@@ -284,76 +500,62 @@ std::vector<Contour> flattenPath(const pathops::Path& path, const FlattenOptions
   return contours;
 }
 
-std::vector<Contour> strokePath(const pathops::Path& path, const Scalar width, const FlattenOptions options) {
-  if (!(width > 0.0f) || !std::isfinite(width)) return {};
+std::vector<Contour> strokePath(const pathops::Path& path, const StrokeStyle& style,
+        const FlattenOptions options) {
+  if (!(style.width > 0.0f) || !std::isfinite(style.width)) return {};
 
-  const Scalar half = width * 0.5f;
+  const Scalar half = style.width * 0.5f;
   // The unfiltered polylines: a stroke of a single line is the case a fill cannot express and the one
   // that matters most.
   const std::vector<Contour> flattened = flattenToPolylines(path, options);
 
-  std::vector<Contour> result;
-  // A generous reserve: one quad per flattened edge, which is the dominant term.
-  result.reserve(flattened.size());
-
-  /** Appends the quad covering one edge of the stroke. */
-  const auto appendEdge = [half](const Point& a, const Point& b, std::vector<Point>& out) {
-    const Point normal = direction(a, b);
-    if (normal.x == 0.0f && normal.y == 0.0f) return; // a zero-length edge has no direction to offset
-
-    // The perpendicular, scaled to half the width.
-    const Scalar ox = -normal.y * half;
-    const Scalar oy = normal.x * half;
-
-    // One quad per edge, each closed on its own. Overlapping quads would be a problem for the even-odd rule,
-    // where two overlapping regions cancel -- but the stroke is always filled with the nonzero rule, where
-    // overlaps simply stay filled. That is why the stroke can be built this way at all.
-    out.push_back(Point{ a.x + ox, a.y + oy });
-    out.push_back(Point{ b.x + ox, b.y + oy });
-    out.push_back(Point{ b.x - ox, b.y - oy });
-    out.push_back(Point{ a.x - ox, a.y - oy });
-  };
+  StrokeOutline outline;
 
   for (const Contour& contour: flattened) {
-    const std::vector<Point>& points = contour.points;
-    if (points.size() < 2) continue;
-
-    // ## One contour per piece, not one contour holding every piece
+    // ## One point per distinct position
     //
-    // Each edge's quad and each vertex's disc is emitted as its own closed contour, and the nonzero rule takes their
-    // union -- so the stroke comes out with no seams where the pieces overlap, which is what this is for.
-    //
-    // Concatenating them into a single contour instead is the obvious-looking thing to do and it is wrong: consecutive
-    // pieces are then joined by a straight segment from the end of one to the start of the next, and those segments cut
-    // across the shape. The contour becomes a pinwheel whose chords wind around the interior, so a point inside the
-    // shape can have nonzero winding and the stroke fills an area nobody drew. It stayed hidden because a two-point
-    // line is one quad and has no joins at all -- and that is the case every stroke test used.
-    for (size_t i = 0; i < points.size(); ++i) {
-      const Point& a = points[i];
-      const Point& b = points[(i + 1) % points.size()];
-
-      Contour quad;
-      appendEdge(a, b, quad.points);
-      if (quad.points.size() >= 3) {
-        quad.closed = true;
-        result.push_back(std::move(quad));
-      }
+    // Consecutive duplicates are dropped before anything is offset. They are what a flattened curve produces where a
+    // subdivision is finer than the coordinates can express, and a zero-length edge has no direction to offset -- left
+    // in, it turns into a division that the direction helper papers over while the join arithmetic either side of it
+    // reads a meaningless normal.
+    std::vector<Point> points;
+    points.reserve(contour.points.size());
+    for (const Point& point: contour.points) {
+      if (points.empty() || distanceSquared(points.back(), point) > 1e-12f) points.push_back(point);
     }
 
-    // A disc at every vertex covers the wedge the two adjoining quads leave, which is the round join. Doing
-    // it for every vertex rather than only the convex ones is simpler and correct: at a concave corner the
-    // disc is already inside the quads' union, so it adds nothing but a few redundant edges.
-    for (const Point& point: points) {
-      Contour disc;
-      appendDisc(point, half, disc.points);
-      if (disc.points.size() >= 3) {
-        disc.closed = true;
-        result.push_back(std::move(disc));
+    bool closed = contour.closed;
+    // A contour that returns to its own start is closed in fact even if the path spelled the return as a `lineTo`
+    // instead of a `close`. `flattenToPolylines` already drops the duplicated final point and records the closure --
+    // this only has to avoid treating the two remaining coincident ends as an edge.
+    if (closed && points.size() >= 2 && distanceSquared(points.front(), points.back()) <= 1e-12f) {
+      points.pop_back();
+    }
+    if (points.size() < 2) continue;
+
+    const size_t count = points.size();
+    const size_t edgeCount = closed ? count : count - 1;
+    for (size_t i = 0; i < edgeCount; ++i) {
+      appendEdgeQuad(points[i], points[(i + 1) % count], half, outline);
+    }
+
+    if (closed) {
+      // Every vertex is a join, including the one where the closing edge meets the first. That wrap is why the index
+      // arithmetic is modular rather than a plain loop over the interior points.
+      for (size_t i = 0; i < count; ++i) {
+        appendJoin(points[(i + count - 1) % count], points[i], points[(i + 1) % count], half, style.join,
+                style.miterLimit, outline);
+      }
+    } else {
+      appendCap(points.front(), direction(points.front(), points[1]), true, half, style.cap, outline);
+      appendCap(points.back(), direction(points[count - 2], points.back()), false, half, style.cap, outline);
+      for (size_t i = 1; i + 1 < count; ++i) {
+        appendJoin(points[i - 1], points[i], points[i + 1], half, style.join, style.miterLimit, outline);
       }
     }
   }
 
-  return result;
+  return std::move(outline).take();
 }
 
 } // namespace graphics::raster

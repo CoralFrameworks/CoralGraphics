@@ -18,6 +18,7 @@
 #include <graphics/Path.h>
 
 #include <private/graphics/Flatten.h>
+#include <private/graphics/StrokeOptions.h>
 
 #include <algorithm>
 #include <cmath>
@@ -149,7 +150,13 @@ bool StrokeRec::applyToPath(Path* dst, const Path& src) const {
   // The outline is computed in the path's own space, so the stroke width is not scaled here: a stroke of two units is
   // two units wide however large the shape is drawn, and the transform is applied to the outline afterwards. Scaling
   // it here would be applying the transform twice.
-  const auto contours = raster::strokePath(*source, mWidth, raster::FlattenOptions { kFlattenTolerance });
+  const raster::StrokeStyle style {
+    mWidth,
+    raster::strokeCapFor(mCap),
+    raster::strokeJoinFor(mJoin),
+    mMiterLimit,
+  };
+  const auto contours = raster::strokePath(*source, style, raster::FlattenOptions { kFlattenTolerance });
   if (contours.empty()) return false;
 
   pathops::Path outline;

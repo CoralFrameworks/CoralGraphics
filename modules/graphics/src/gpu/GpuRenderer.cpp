@@ -2751,11 +2751,12 @@ backend::Result GpuRenderer::resolveCoverageFields(Frame& frame) {
   // magnitude -- so the finer question costs what the coarser one did.
   mFieldIdentities.clear();
   mFieldIdentities.reserve(count);
-  bool everyFieldSame = mFieldCache.valid && mFieldCache.lattices.size() == count;
+  const bool havePrevious = mFieldCache.valid && mFieldCache.lattices.size() == count;
+  bool everyFieldSame = havePrevious;
   // "The layout is still valid" is **not** "the lattices are equal": a field whose box grew by a texel still fits the slot
   // it had, and the slot is what decides whether its bytes are still where they belong. That is the whole of 4.1.45's
   // measurement, and the reason the placement rounds its slots up.
-  bool everyFieldFits = everyFieldSame;
+  bool everyFieldFits = havePrevious;
   // How many points this pass hashes, for the trace: the key's cost is per *field* for the bookkeeping and per *point* for
   // the hashing, so the two have to be separable to know which half to attack (4.1.51).
   uint64_t keyedPoints = 0;
@@ -2781,12 +2782,22 @@ backend::Result GpuRenderer::resolveCoverageFields(Frame& frame) {
     }
     mFieldIdentities.push_back(identity);
 
-    if (!everyFieldSame) continue;
+    if (!havePrevious) continue;
     const FieldLattice& before = mFieldCache.lattices[index];
-    if (!identity.sameLattice(before) || identity.contentKey != before.contentKey || identity.hasCoverage) {
+
+    // ## The slot question is asked for *every* field, not only until the first content change
+    //
+    // This loop used to `continue` as soon as `everyFieldSame` became false, which meant the `slotHolds` check below ran
+    // only for the fields before the first changed one. A frame with one changed field near the front therefore kept the
+    // old placement even when a later field had grown past the slot it owned -- and the refill then wrote its wider
+    // rows over whatever the packer had placed beside it. The two questions are independent: `everyFieldSame` asks
+    // whether *anything* changed at all, while `everyFieldFits` asks whether the old slots still describe *every*
+    // field's new box, and a content change is not a reason to stop asking the second.
+    if (!before.slotHolds(identity)) everyFieldFits = false;
+    if (everyFieldSame &&
+        (!identity.sameLattice(before) || identity.contentKey != before.contentKey || identity.hasCoverage)) {
       everyFieldSame = false;
     }
-    if (!before.slotHolds(identity)) everyFieldFits = false;
   }
   const double keyMilliseconds = millisecondsSince(start);
 
@@ -6182,52 +6193,20 @@ backend::Result GpuRenderer::drawPath(Frame& frame, const DrawList::Command& com
   // the buffer this one found. Redrawing the fan is what makes that true for a self-overlapping contour
   // as well: a fragment visited twice is written zero twice.
   //
-  // ================================================================================================
-  // OPEN DEFECT: this pass does not appear to clear the stencil, and the evidence is a wrong picture
-  // ================================================================================================
+  // ## Why redrawing the fan is the correct reset
   //
-  // `GpuSurface.OnePathDoesNotBleedIntoTheNext` draws two disjoint opaque rectangles, neither transformed, and
-  // the second paints over the first: the red rectangle's pixels come back white. Reading the sequence, that is
-  // only possible if the stencil still holds the *first* path's winding when the second path covers -- the
-  // cover tests `NotEqual 0`, so a cleared stencil would reject the second path's cover in the first path's
-  // region and leave the red alone. The same fact at scene scale is why the last shape bleeds over every
-  // earlier one, which is what `TheGpuAndTheRasterizerAgreeOnAScene` reports as a colour mismatch.
+  // The accumulation pass only ever writes a stencil value inside the fan triangles it rasterises. Redrawing the same
+  // triangles with `StencilOp::Zero` therefore clears exactly the fragments that can hold a value, and the cover pass in
+  // between cannot write one (`StencilCover`'s write mask is zero). That is why the reset needs no full-target clear:
+  // a clear of the whole target would be correct but would also throw away every layer's stencil work, and an earlier
+  // attempt at it wrote over the frame's background.
   //
-  // So the suspect is this pass, or the cover that runs before it. Ruled out by reading, each with the reason:
-  //
-  //   * The stencil-op translation. `toGLStencilOp(StencilOp::Zero)` is `GL_ZERO` (`GlEnums.h`), which is the
-  //     op that writes zero when the stencil and depth tests pass.
-  //   * The state reaching the driver. `replay()` applies `glStencilFuncSeparate`, `glStencilOpSeparate` and
-  //     `glStencilMaskSeparate` for both faces on every pipeline bind, with no caching in front of them, and
-  //     `StencilReset` builds its `StencilFaceState` from the same `passOp` the variant switch uses.
-  //   * The write masks. The reset variant sets `face->writeMask = 0xFF` (stencil) and
-  //     `colorTargets[0].writeMask = 0x0` (colour), and the cover variant sets the stencil mask to zero so it
-  //     cannot itself disturb what it reads.
-  //   * The scissor. The second path's cover is confined -- the gap between the two rectangles stays clear --
-  //     so the cover is running and its region is right. What is wrong is *where inside that region it passes*.
-  //   * The fan geometry. `bindFans` binds `fanOffset + fan.firstVertex * kPathVertexStride` for the reset
-  //     exactly as it does for the accumulation, so the reset redraws the same triangles.
-  //
-  // The next step is instrumentation rather than more reading: count the three passes per path and assert the
-  // count, which distinguishes "the reset does not run" from "it runs and does nothing". If it runs, the next
-  // question is whether `GL_ZERO` is reaching the driver for the reset specifically -- a `glStencilOpSeparate`
-  // trace for one frame answers both at once.
-  //
-  // **Measured, and it settles the fork.** `Surface::diagnostics()` for the two-rectangle case reports
-  // `commands=3 batches=3 draws=7 ... pathsWithoutStencil=0`. Three commands are the clear and the two
-  // rectangles; seven draws are the clear plus three passes for each path; and `pathsWithoutStencil=0` says the
-  // stencil route was taken, not the convex-fan fallback. So the reset pass *runs* and the stencil is still not
-  // cleared, which rules out the fallback entirely and narrows the question to the reset pass's own state:
-  // whether `GL_ZERO` reaches the driver for it, and whether the second path's accumulation is what is
-  // actually leaving the first path's region non-zero. A `glStencilOpSeparate` trace for one frame answers both,
-  // and that is the next concrete step rather than another reading of this function.
-  //
-  // Left as a documented defect rather than worked around. The available workarounds -- clearing the stencil
-  // between paths with a full-target pass, or resetting it on the CPU side by tracking which paths overlap --
-  // both hide a state bug behind a redundant draw, and this is the second defect in this renderer whose cause
-  // was a state fact assumed rather than measured.
-  //
-  // ================================================================================================
+  // This was documented here as an open defect for a while, on the evidence of a test that drew two *disjoint*
+  // rectangles. Disjoint bounds are precisely the case that cannot show it: the second path's cover rectangle is its
+  // own bounds, so it never overlapped the first path's stencil region in the first place. The case that can show it --
+  // a non-antialiased circle over a filled rectangle, whose cover rectangle contains pixels the circle does not -- is
+  // `GpuSurface.ANonAntialiasedPathDoesNotBleedIntoTheNext`, and it passes on both backends. The comment is kept as a
+  // record of the wrong conclusion because the test that produced it is still in the suite and still looks convincing.
   const PipelineKey resetKey{ Program::PathFan, Variant::StencilReset, kNoBlendMode, target.format, depthFormat,
     target.sampleCount };
   backend::RenderPipelineHandle resetPipeline = backend::RenderPipelineHandle::invalid();

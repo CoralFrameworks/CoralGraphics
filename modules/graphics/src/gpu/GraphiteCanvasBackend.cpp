@@ -58,6 +58,7 @@
 #include <private/graphics/BlendMode.h>
 #include <private/graphics/CanvasBackend.h>
 #include <private/graphics/Flatten.h>
+#include <private/graphics/StrokeOptions.h>
 #include <private/graphics/Rasterizer.h>
 #include <private/gpu/ContextImpl.h>
 
@@ -957,8 +958,14 @@ public:
 
   void drawPath(const pathops::Path& devicePath, const FillType fillType, const Scalar scale,
           const Matrix& deviceToUser, const Paint& paint) override {
-    const std::vector<raster::Contour> contours = paint.style == Paint::Style::kStroke
-            ? raster::strokePath(devicePath, paint.strokeWidth * scale)
+    // The outline of a stroke is a union of overlapping pieces -- one quad per edge, a join per vertex, a cap per open
+    // end -- so it must be rasterised with the nonzero rule whatever fill rule the path itself carries. An even-odd
+    // stroked line is the case that makes this visible: its pieces overlap in pairs, and parity cancels every one of
+    // them. The fill rule of the path answers a question about filling the path, not about filling its outline.
+    const bool stroked = paint.style == Paint::Style::kStroke;
+    const FillType effectiveFillType = stroked ? raster::strokeFillType() : fillType;
+    const std::vector<raster::Contour> contours = stroked
+            ? raster::strokePath(devicePath, raster::strokeStyleFor(paint, scale))
             : raster::flattenPath(devicePath);
     if (contours.empty()) return;
 
@@ -998,7 +1005,7 @@ public:
     const bool layered = beginBlendLayer(bounds, paint, &inner);
     command.layer = mDrawLayer;
 
-    command.state.fillType = fillType;
+    command.state.fillType = effectiveFillType;
     fillState(inner, deviceToUser, Point { bounds.getLeft(), bounds.getTop() }, inner.antiAlias, &command.state);
 
     // ## A small, solid, antialiased path is recorded as a coverage *field* instead of as a stencil fill
@@ -1067,7 +1074,7 @@ public:
     constexpr Scalar kMaxCoverageExtent = 1024.0f;
     const bool coverage = command.state.antiAlias && !paint.hasShader() && !paint.hasColorFilter() &&
                           bounds.getWidth() <= kMaxCoverageExtent && bounds.getHeight() <= kMaxCoverageExtent;
-    if (coverage && recordCoverageField(contours, command.firstContour, bounds, fillType, inner)) {
+    if (coverage && recordCoverageField(contours, command.firstContour, bounds, effectiveFillType, inner)) {
       mList->bounds = unite(mList->bounds, bounds);
       if (layered) onRestore();
       return;

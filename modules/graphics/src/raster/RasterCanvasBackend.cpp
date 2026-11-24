@@ -18,6 +18,7 @@
 
 #include <private/graphics/Blend.h>
 #include <private/graphics/Flatten.h>
+#include <private/graphics/StrokeOptions.h>
 #include <private/graphics/Rasterizer.h>
 
 #include <minilog/log.h>
@@ -393,18 +394,21 @@ public:
     // Geometry is taken to device space by the canvas *before* flattening, so the flattening tolerance is a constant
     // in pixels. Flattening first and scaling after would give a zoomed-in curve too few segments, and it would look
     // faceted while the same curve at 1:1 looked smooth -- the error has to be measured in the units the viewer sees.
+    const bool stroked = paint.style == Paint::Style::kStroke;
     std::vector<raster::Contour> contours;
-    if (paint.style == Paint::Style::kStroke) {
+    if (stroked) {
       // The width is scaled into device space. Under a rotation or a uniform scale that is exact; under a non-uniform
       // one it is an approximation, because a stroke of constant width in caller space is an ellipse in general and
       // this produces a circle. Stated here rather than silently done, since the difference is visible on a strongly
       // skewed transform and invisible everywhere else.
-      contours = raster::strokePath(devicePath, paint.strokeWidth * scale);
+      contours = raster::strokePath(devicePath, raster::strokeStyleFor(paint, scale));
     } else {
       contours = raster::flattenPath(devicePath);
     }
 
-    fill(contours, fillType, paint, deviceToUser);
+    // The outline is a union of overlapping pieces, so it is nonzero whatever the path's own fill rule says. See the
+    // matching note in `GraphiteCanvasBackend::drawPath`: under even-odd, a stroke's overlaps cancel to nothing.
+    fill(contours, stroked ? raster::strokeFillType() : fillType, paint, deviceToUser);
   }
 
   void drawGlyphRun(const pathops::Path& deviceOutline, const Paint& paint,
