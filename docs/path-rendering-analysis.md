@@ -1,16 +1,38 @@
-# CoralGraphics Path/Stroke 渲染问题分析
+# CoralGraphics Path/Stroke 渲染问题分析与修复
+
+> 本文是对 `docs/path-rendering-analysis.md` 初版的复核与修订。初版把主要根因归到
+> `strokePath` 忽略 open contour 和 stencil reset 的 open defect；复核后确认：
+> 前者的确存在，但不是最严重的一条；后者在当前代码上**不是**缺陷，初版依据的测试本身
+> 选错了形状。真正的首要根因是 stroke 输出的各个片元 **winding 方向不一致**，在 nonzero
+> 填充下相互抵消。本文给出证据、修复和回归测试。
 
 ## 摘要
 
-RadioGroup、SearchField、菜单箭头、checkbox 和焦点环出现的“横向残线 / 方块 / 帧间闪烁”，不是单个控件的状态错误，而是几层问题叠加：
+RadioGroup、SearchField、菜单箭头、checkbox 和焦点环出现的“横向残线 / 方块 / 帧间闪烁”，
+是同一套 path/stroke 管线上几个独立缺陷叠加的结果：
 
-1. **CoralUI 的所有圆、线、圆角矩形最终都走 `Canvas::drawPath`。**
-2. `drawPath` 的 stroke 分支由 `raster::strokePath` 把路径扩展成独立四边形和圆盘。
-3. **`strokePath` 没有尊重 open contour，始终把最后一个点连回第一个点**，会生成原本不存在的闭合边。
-4. 小尺寸、抗锯齿、无 shader 的 path 会走 **coverage field** 路径；大尺寸或关闭 AA 的 path 走 **stencil** 路径，而 stencil reset 代码里仍有一个已记录的 open defect。
-5. CoralUI 的 Layer 录制缓存和 popup damage 会把单帧的 path 错误放大成“移动鼠标后出现 / 再移动一次又恢复”的现象。
-
-因此，控件层的临时规避（RadioButton 用填充圆、SearchField 裁剪绘制）可以消掉当前症状，但不能修好整个图形栈。
+1. **CoralGraphics 的圆、线、圆角矩形最终都走 `Canvas::drawPath`**（这一条初版判断正确）。
+2. `drawPath` 的 stroke 分支由 `raster::strokePath` 把路径展开成独立四边形、join 片元和
+   cap 片元。
+3. **`strokePath` 输出的 edge quad 与 join disc 的绕向相反**。stroke 靠 nonzero 规则把这些
+   重叠片元取并集；方向相反时重叠区会抵消为 0。结果是圆角边框每个角出现缺口、描边圆环
+   整圈变淡（每个扁平化顶点都是一个 join），也就是 UI 上看到的残线、断环和“闪一下”。
+   两点直线之所以碰巧正常，是因为它把同一条边的 quad 发出了两次（正向 + 反向），
+   双重 winding 刚好扛住了一个反向 disc——这也是初版和旧测试没发现它的原因。
+4. **`strokePath` 不检查 `contour.closed`**：open contour 会多出一条从末点回到首点的
+   虚构边。三点及以上的折线（勾、箭头、折线图标）会被这条边填成三角形/斜线。
+5. **stroke 不遵守 `Paint::strokeCap` / `strokeJoin`**：函数只接收宽度，固定输出 round
+   join + round cap。SVG 的 `stroke-linecap`/`stroke-linejoin` 因此被静默忽略。
+6. **stroke 直接用 path 的 fill rule**：若 path 是 even-odd，stroke 的并集会被奇偶规则
+   减掉，两点直线甚至完全不可见。
+7. **coverage field 帧间缓存有一个提前退出的 slot 检查**：只要前面的 field 内容变化，
+   后面的 field 就不再检查“新 box 是否还装得进旧 slot”。一个变大的 field 会被写进过小的
+   槽位，覆盖邻居的 texel，产生方块/残线，并且只有在“前面有变化、后面又变大”的帧才出现。
+8. **stencil reset 复核结论：当前实现是正确的**。accumulation 只在 fan 三角形内写 stencil，
+   cover pass 的 stencil 写掩码为 0，reset 用同一组 fan 三角形 + `StencilOp::Zero`，因此
+   清零范围恰好等于可能被写过的范围。初版的“open defect”来自一个用两个**不相交**矩形
+   构造的测试：第二个 path 的 cover 矩形就是它自己的 bounds，根本不会覆盖第一个 path 的
+   stencil 区域，所以那个测试既不能证明也不能证伪 reset。
 
 ---
 
@@ -27,266 +49,251 @@ void Canvas::drawOval(...)      { drawPath(ovalPath(bounds), paint); }
 void Canvas::drawRoundRect(...) { drawPath(roundRectPath(rect), paint); }
 ```
 
-所以：
+所以 RadioButton 的圆环、SearchField 的放大镜、Select 的箭头、CheckBox 的勾、焦点环、
+圆角边框共享同一条 path/stroke 管线。
 
-- RadioButton 的圆环；
-- SearchField 的放大镜；
-- Select 的箭头；
-- CheckBox 的勾；
-- 焦点环；
-- 圆角边框；
+### 1.2 后端把 stroke 展开成轮廓
 
-全部共享同一条 path/stroke 管线。
-
-### 1.2 Graphite 后端把 stroke 展开为轮廓
-
-`CoralGraphics/modules/graphics/src/gpu/GraphiteCanvasBackend.cpp`：
+`GraphiteCanvasBackend.cpp`（raster 后端同理）：
 
 ```cpp
-const std::vector<raster::Contour> contours =
-    paint.style == Paint::Style::kStroke
-        ? raster::strokePath(devicePath, paint.strokeWidth * scale)
+const bool stroked = paint.style == Paint::Style::kStroke;
+const FillType effectiveFillType = stroked ? raster::strokeFillType() : fillType;
+const std::vector<raster::Contour> contours = stroked
+        ? raster::strokePath(devicePath, raster::strokeStyleFor(paint, scale))
         : raster::flattenPath(devicePath);
 ```
 
-之后：
-
-- `recordCoverageField(...)`：小、抗锯齿、solid path 走 coverage field；
-- 否则记录 `DrawList::Kind::Path`，由 `GpuRenderer::drawPath` 走 stencil fan + cover。
+之后小尺寸、抗锯齿、无 shader 的 solid path 走 coverage field；大尺寸或关闭 AA 的 path
+走 stencil fan + cover。
 
 ---
 
-## 2. 发现的具体问题
+## 2. 复核发现的问题
 
-### P0：`strokePath` 会把 open contour 强制闭合
+### P0-1：stroke 片元的 winding 方向不一致（首要根因）
 
-`CoralGraphics/modules/graphics/src/raster/Flatten.cpp`，`strokePath`：
+旧实现每次 stroke 生成两类片元：
+
+- 每条边一个四边形，点序为 `a+o, b+o, b-o, a-o`；
+- 每个顶点一个圆盘，`appendDisc` 按角度 0 → 2π 递增生成。
+
+两者的 signed area 符号相反。旧代码依赖“nonzero 填充把重叠片元取并集”，但 nonzero 只对
+**同向**重叠做加法；反向重叠会把 winding 减回去。一个封闭圆角矩形 stroke 的角部因此出现
+半圆形空洞：
+
+```text
+修复前（4px 描边矩形）              修复后
+..-+-+####+-+-..                  ..-+########+-..
+..+#.-####-.#+..                  ..+##########+..
+..-.########.-..                  ..############..
+..+-########-+..                  ..############..
+..####....####..                  ..####....####..
+```
+
+描边圆环更明显：圆被扁平化成许多顶点，每个顶点都是 join，整圈都落进抵消区，所有像素都
+只有部分覆盖（旧输出里一个 255 都没有）。这正是 SearchField 放大镜、Spinner 圆环、
+RadioButton 焦点环“发虚 / 断线”的来源。
+
+证据：把旧 `strokePath` 输出中点数大于 4 的 disc 片元反转点序后重新填充，矩形角部缺口
+立刻消失；这正是新实现 `StrokeOutline::append` 所做的事——每个片元都按 signed area
+统一绕向，再交给 nonzero 填充。
+
+### P0-2：`strokePath` 忽略 open contour
+
+旧实现：
 
 ```cpp
 for (size_t i = 0; i < points.size(); ++i) {
-  const Point& a = points[i];
   const Point& b = points[(i + 1) % points.size()];
   appendEdge(a, b, quad.points);
 }
 ```
 
-这里的问题不是 `%` 本身，而是 **没有检查 `contour.closed`**。
+没有检查 `contour.closed`。三点折线 `A -> B -> C` 会多生成一条 `C -> A`，表现为斜线、
+三角形色块或横向残线。两点直线不受影响（`B -> A` 与 `A -> B` 是同一个 quad，方向也相同）。
 
-对于一个 open polyline：
+修复时还要处理“用 `lineTo(start)` 显式闭合”的写法：`flattenToPolylines` 会丢掉重复的
+末点，所以必须在丢掉之前把 contour 记为 closed，否则修好 open contour 后又会丢掉显式
+闭合边。现在 `finishContour` 用 `closing || returnsToStart` 记录闭合。
 
-```text
-A(10,10) -> B(30,10) -> C(30,30)
-```
+### P0-3：stroke 不接受 cap/join
 
-实际会生成三条边：
+`Paint` 的默认值是 `strokeCap = kButt`、`strokeJoin = kMiter`，SVG 也解析并写入这两个
+字段；但旧的 `strokePath(path, width)` 固定输出 round join + round cap，调用方传入的
+值根本到不了几何层。后果：
 
-```text
-A -> B
-B -> C
-C -> A   // 不存在，应该没有
-```
+- 每条线都会比声明的长度多出半个线宽的圆头；
+- 直角边框的角被画成圆角；
+- SVG 的 `stroke-linecap="butt"` / `stroke-linejoin="miter"` 不生效。
 
-最后一条 `C -> A` 是一条斜边，会出现在裁剪/覆盖结果里，表现为：
+现在 `StrokeStyle` 携带 width/cap/join/miterLimit，`StrokeOptions.h` 负责从 `Paint` 映射；
+butt/round/square 与 miter/round/bevel 都有实现。
 
-- 控件下面多出一条斜线或横线；
-- 在某些缩放/裁剪下只看到一段横向残线；
-- 同一个 path 在不同 frame 下因为 coverage field 的边界/裁剪不同而“闪一下”。
+### P0-4：stroke 继承了 path 的 fill rule
 
-`flattenToPolylines` 已经维护了 `contour.closed`，stroke 分支只需要遵守它：
+stroke 的轮廓是一组重叠片元，**必须**用 nonzero 填充。若 path 自己设了 even-odd，旧代码
+会把同一个 rule 传给 stroke，重叠区按奇偶抵消——两点直线的 quad 被发出两次，直接完全
+消失。现在 `Canvas::drawPath`、两个后端和 `StrokeRec` 都把 stroke 的填充规则钳到
+`FillType::Winding`。
 
-```cpp
-const size_t edgeCount = contour.closed ? points.size() : points.size() - 1;
-for (size_t i = 0; i < edgeCount; ++i) {
-  const Point& a = points[i];
-  const Point& b = points[(i + 1) % points.size()];
-  ...
-}
-```
+### P1：coverage field 缓存的 slot 检查提前终止
 
-### P0：stroke 端点和 join 的语义不完整
-
-`strokePath` 当前对**每个顶点**都加一个圆盘，并且对**每条边**加一个闭合四边形。它实际上固定为：
-
-```text
-round join + round cap
-```
-
-这对 UI 图标大多可以接受，但需要注意：
-
-- open contour 的起点/终点也会加圆盘，这是 round cap；
-- 如果未来支持 butt/square cap，当前结构会把 cap 和 join 混在一起；
-- 每次 stroke 产生 `N` 个四边形 + `N` 个圆盘，全部是独立 contour，依赖 nonzero 填满并集。
-
-这本身不是错误，但让 **coverage field 的 contour 数量和 bounds 比预期大**，更容易触发 field 边界/裁剪问题。
-
-### P1：小 path 走 coverage field，而不是 stencil
-
-`GraphiteCanvasBackend::drawPath` 的门槛：
+`GpuRenderer::resolveCoverageFields` 用 `everyFieldFits` 决定能否保留上一帧的 atlas 布局。
+旧循环：
 
 ```cpp
-const bool coverage =
-    command.state.antiAlias &&
-    !paint.hasShader() &&
-    !paint.hasColorFilter() &&
-    bounds.getWidth() <= 1024.0f &&
-    bounds.getHeight() <= 1024.0f;
+if (!everyFieldSame) continue;          // 第一个内容变化后，后续 field 全部跳过
+const FieldLattice& before = ...;
+if (!before.slotHolds(identity)) everyFieldFits = false;   // 这句不再执行
 ```
 
-因此 UI 里的图标/焦点环/箭头大多走 coverage field：
+`everyFieldSame`（是否完全没变）和 `everyFieldFits`（每个新 box 是否还装得进旧 slot）是
+两个独立问题。一个“field 0 内容变了、field 1 同时变大”的帧会保留旧布局，然后把变大的
+field 1 写进过小的槽位，覆盖相邻 field 的 texel。表现为帧间出现方块/残线，且只有特定
+组合的帧才触发。修复后 slot 检查对每个 field 都执行；回归测试
+`GpuSurface.AFieldThatGrowsAfterAnEarlierFieldChangedIsStillRepacked` 在原逻辑下会在
+`(14, 13)` 与 cold render 不一致。
 
-```text
-CPU 生成 coverage texture
- -> coverage.frag 采样
-```
+### P1（更正）：stencil reset 不是缺陷
 
-这条路径没有 stencil reset 问题，但会继承 **stroke contour 本身的错误**。也就是说：
+初版称 `Variant::StencilReset` 没有清掉 stencil，依据是 `OnePathDoesNotBleedIntoTheNext`。
+但该测试画的是两个**不相交**矩形，第二个 path 的 cover 矩形根本不会覆盖第一个 path 的
+stencil 区域，所以它无法暴露这个问题。
 
-- RadioButton 的残线如果来自 stroke，修 `strokePath` 才会消失；
-- 只在 UI 里换成填充圆只是绕过。
+真正能暴露问题的形状是：先画一个大矩形，再在它内部画一个**关闭 AA 的圆**。圆的 cover
+矩形是它的 bounding box，box 内、圆外的像素如果仍保留前一个 path 的 stencil，就会被
+第二个 path 的颜色整块涂满——也就是“图标变成方块”。新增测试
+`GpuSurface.ANonAntialiasedPathDoesNotBleedIntoTheNext` 正是这个形状，Metal 与 OpenGL
+都通过。原因也成立：accumulation 只在它光栅化的 fan 三角形内写值，cover 的 stencil
+writeMask 为 0，reset 用同一组三角形 + `StencilOp::Zero`，清零范围恰好等于可能写过的
+范围。因此不需要全 target clear（早期尝试全 target clear 会破坏背景）。
 
-### P1：大 path 的 stencil reset 仍有 open defect
+### P2：Layer 录制缓存 / damage（仍属 CoralUI）
 
-`GpuRenderer.cpp` 的 stencil reset：
-
-- 代码里仍保留 `OPEN DEFECT: this pass does not appear to clear the stencil` 注释；
-- reset 用 fan 重绘：
-  ```cpp
-  return bindFans(resetPipeline, mPathSet);
-  ```
-- 对于自重叠、圆角、多 contour 的 path，reset 和 accumulation 的覆盖可能不完全一致；
-- 一旦残留 winding，下一个 path 的 cover 会命中错误 stencil。
-
-这条路径主要影响：
-
-- 关闭抗锯齿的 path；
-- 带 shader / color filter 的 path；
-- 大于 1024 的 path。
-
-它不是当前小图标的主路径，但属于同一套 path 架构的潜在缺陷。
-
-### P2：Layer 录制缓存会放大单帧错误
-
-CoralUI 的 `Layer` 会把子树拆成 child segments 并缓存。popup/menu hover 只把 menu segment 标脏时：
-
-- page segment 可能复用上一帧的绘制列表；
-- path 的 image/atlas、bounds 或 damage 与当前帧不一致；
-- 单帧的线条/方块会留在缓存里，直到下一次整页损坏。
-
-这解释了两个 UI 层现象：
-
-- 只做 panel damage 时“闪一下”；
-- 只做 full frame 时“方块残留”。
-
-这属于 CoralUI 的 Layer/damage 设计问题，不属于 path 几何本身；报告将它和 GPU path 问题分开。
+CoralUI 的 `Layer` 会把子树拆成 child segments 并缓存；只做 panel damage 时可能复用上一帧
+的 display list。单帧的 path 错误会被缓存放大成“移动鼠标后出现、再移动又恢复”。这属于
+CoralUI 的 Layer/damage 设计，不是 path 几何本身；但它会放大上面 P1 这类帧间缓存错误，
+所以在修 CoralGraphics 的缓存逻辑时也要一起看。
 
 ---
 
 ## 3. 当前症状与根因对应
 
-| 症状 | 最可能来源 | 说明 |
+| 症状 | 根因 | 状态 |
 |---|---|---|
-| RadioGroup 选中行下横线 | `strokePath` open contour 闭合 / 旧焦点环 stroke | RadioButton 已临时改为填充圆规避 |
-| SearchField 放大镜异常 | stroke 轮廓 / coverage field | 放大镜是 circle + line 的 stroke |
-| 下拉箭头方块 | stroke/coverage field 或 stencil 残留 | 箭头是 `drawLine` |
-| 菜单 checkmark 方块 | 小 path coverage field | checkmark 是两条 stroke |
-| hover 后图标闪一下 | Layer 录制缓存 + damage | 不一定是 path 本身 |
-| 大面积方块 | stencil reset / layer cache | 需要分路径排查 |
+| RadioGroup 选中行下横线 / 焦点环缺口 | stroke 片元 winding 相反；旧焦点环 stroke | 已修（CoralUI 的填充圆 workaround 现在可以移除） |
+| SearchField 放大镜发虚 / 断环 | 描边圆每个顶点 join 片元与 edge 片元抵消 | 已修 |
+| 下拉箭头 / 勾的端点形状不对 | 固定 round cap，忽略 `strokeCap` | 已修 |
+| 三点折线图标出现斜线/三角块 | open contour 被强制闭合 | 已修 |
+| even-odd path 的 stroke 消失 | stroke 继承 even-odd | 已修 |
+| hover 后图标闪一下 | CoralUI Layer 缓存 + 帧间 field 缓存 | CoralGraphics 缓存 bug 已修；Layer/damage 仍待 CoralUI 处理 |
+| 非 AA path 变成方块 | 初版怀疑 stencil reset，实测不是 | 复核为不是缺陷；新增真实回归测试 |
+| 大面积方块 | 初版怀疑 stencil reset / layer cache | 需按上面的新测试重新排查；stencil 侧已排除 |
 
 ---
 
-## 4. 建议修复顺序
+## 4. 实际修复内容
 
-### 第 1 步：修 `strokePath` 的 open contour（低风险、先做）
+### 4.1 stroke 几何重写
 
 文件：
 
-```text
-CoralGraphics/modules/graphics/src/raster/Flatten.cpp
-```
+- `modules/graphics/include/private/graphics/Flatten.h`
+- `modules/graphics/src/raster/Flatten.cpp`
 
-修改：
+要点：
 
-- `strokePath` 检查 `contour.closed`；
-- open contour 只生成 `points.size() - 1` 条 edge；
-- 保留端点圆盘作为 round cap；
-- 增加回归测试。
+- 新增 `StrokeCap` / `StrokeJoin` / `StrokeStyle`；`strokePath` 改为接收 `StrokeStyle`。
+- `StrokeOutline::append` 统一所有片元的绕向（signed area 为正则反转），从结构上消除
+  “某类片元方向相反”的整类问题。
+- edge quad、round/bevel/miter join、butt/round/square cap 分别实现；miter 尊重
+  `miterLimit`，超限退化为 bevel。
+- open contour 只发 `n - 1` 条边，端点按 cap 处理；closed contour 发 `n` 条边并在每个
+  顶点（含首尾 wrap）做 join。
+- `flattenToPolylines` 在丢掉重复末点时记录“显式闭合”。
 
-测试建议：
+### 4.2 cap/join/fill rule 贯通
 
-```cpp
-// 三点 L 形 open stroke
-// 断言 A->C 的对角线区域没有覆盖
-```
+文件：
 
-以及：
+- 新增 `modules/graphics/include/private/graphics/StrokeOptions.h`
+- `modules/graphics/src/gpu/GraphiteCanvasBackend.cpp`
+- `modules/graphics/src/raster/RasterCanvasBackend.cpp`
+- `modules/graphics/src/Canvas.cpp`
+- `modules/graphics/src/StrokeRec.cpp`
 
-```cpp
-// 闭合矩形 stroke 仍然生成最后一条闭合边
-```
+要点：
 
-### 第 2 步：为 stroke / coverage field 增加 GPU 回归
+- `strokeStyleFor(paint, scale)` 把 width/cap/join/miter 映射到 raster 层。
+- 三个入口都把 stroke 的填充规则钳到 nonzero。
+- `StrokeRec::applyToPath` 使用完整的 stroke 参数，不再只传宽度。
 
-在 `GpuSurface` 增加：
+### 4.3 coverage field 缓存
 
-- 小尺寸 stroke 圆环；
-- open polyline；
-- 关闭 AA 的同一形状（走 stencil）；
-- 对比 CPU raster 和 GPU 的像素。
+文件：`modules/graphics/src/gpu/GpuRenderer.cpp`
 
-### 第 3 步：修 stencil reset
+- `everyFieldSame` 与 `everyFieldFits` 分开计算；slot 检查对每个 field 都执行。
+- 保留“内容不变 / 只是移动”时复用 atlas 的既有优化。
 
-当前 fan reset 的已知缺陷需要真正解决。建议：
+### 4.4 文档与过期注释
 
-1. 先用 `CORAL_GPU_TRACE_PATHS=1` 和 stencil state trace 确认 reset pass 实际状态；
-2. 用 **cover 区域清零** 而不是 fan 重绘，但必须只清 path 的 cover 区域，不能覆盖整帧；
-3. 或者对每个 path 用独立 stencil pass，避免跨 path 状态；
-4. 增加 `GpuSurface.OnePathDoesNotBleedIntoTheNext` 的自重叠/圆角版本。
-
-注意：之前的 cover-quad 尝试导致 DemoFrame 红紫背景，说明 reset 的覆盖范围/颜色写 mask 不能被简单扩大到全 target。
-
-### 第 4 步：UI 层减少对 stroke 的依赖
-
-在 GPU 路径修好之前，可以保留这些规避：
-
-- RadioButton 用填充圆（已提交）；
-- SearchField 绘制裁剪（已提交）；
-- 简单勾/箭头尽量用 quad 组合，而不是 `drawLine`。
-
-但这些只是 workaround，不应替代 CoralGraphics 的 stroke 修复。
+- `GpuRenderer::drawPath` 里原来的 `OPEN DEFECT` 长注释改为“为什么 fan reset 是正确的”，
+  并记录初版结论为什么错。
+- `OnePathDoesNotBleedIntoTheNext` 的注释改为它实际覆盖的范围，并指向新的非 AA 测试。
 
 ---
 
-## 5. 当前状态
+## 5. 回归测试
 
-CoralUI：
+CPU / raster（`modules/graphics/tests/test_Canvas.cpp`）：
 
-```text
-7b8c9ac Roll back the menu render experiments
-7526831 Clip SearchField paint to its bounds
-bbcc917 Draw the radio focus ring around the indicator
-eebe0c8 Draw radio indicators with filled circles
-```
+- `CanvasTest.AnOpenPolylineIsNotClosedByItsStroke`
+- `CanvasTest.AClosedContourJoinsItsCornersWithoutHoles`
+- `CanvasTest.AContourThatReturnsToItsStartKeepsItsClosingEdge`
+- `CanvasTest.AStrokedCircleIsASolidRing`
+- `CanvasTest.AStrokeHonoursItsCap`
+- `CanvasTest.AStrokeHonoursItsJoin`
+- `CanvasTest.AnEvenOddStrokeIsStillFilled`
+- `CanvasShapes.ALineIsStrokedBetweenItsPoints`（更新为 butt cap 语义）
 
-菜单实验保留在：
+GPU（`modules/graphics/tests/test_Gpu.cpp`）：
 
-```text
-backup/menu-render-investigation-2026-11-24
-```
+- `GpuSurface.AnOpenPolylineIsNotClosedByItsStrokeOnTheHardwarePath`
+- `GpuSurface.AStrokedCircleIsASolidRingOnTheHardwarePath`
+- `GpuSurface.AStrokedCircleIsASolidRingThroughTheStencilRoute`
+- `GpuSurface.AnEvenOddStrokeIsFilledOnTheHardwarePath`
+- `GpuSurface.ANonAntialiasedPathDoesNotBleedIntoTheNext`（真正走 stencil 的隔离测试）
+- `GpuSurface.AFieldThatGrowsAfterAnEarlierFieldChangedIsStillRepacked`
 
-CoralGraphics：
+Lottie trim 测试更新：
 
-```text
-e4e534b Revert "Clear the whole path cover when resetting stencil"
-```
+- `LottieTrim.ATrimmedStrokeIsShorterThanTheUntrimmedOne`
+- `LottieTrim.TheTwoModesDifferOnASecondShape`
 
-即当前回到 fan reset，未解决 stencil 的 open defect。
+这两个测试原来把“默认 round cap 会多出半圆”写成期望；格式的默认 cap 是 butt，旧期望
+实际是在断言渲染器的 bug。现在按 butt cap 语义更新。
 
 ---
 
-## 6. 结论
+## 6. 验证
 
-优先修 **`strokePath` 忽略 open contour**。这是最小、最明确、可测试的几何错误，能解释多段 open path 的斜线/横线。
+- `test_graphics`：1136 个测试，1110 通过、26 跳过、0 失败（Metal 默认后端）。
+- 关键 GPU 测试在 `CORAL_RHI_BACKEND=opengl` 下也通过。
+- 用修复后的 CoralGraphics 重新构建并运行 CoralUI 的 `test_ui`：747 个测试，741 通过、
+  6 跳过、0 失败（CoralUI 通过 `../CoralGraphics` 引用当前工作区，所以这是真实的端到端
+  验证）。
 
-stencil reset 是第二个独立问题，影响关闭 AA、带 shader 或大尺寸 path；不应再通过 UI 全帧重绘绕过。
+---
 
-Layer 录制缓存/damage 是第三个问题，属于 CoralUI；它解释“为什么同一个 path 在某些 frame 里正常、某些 frame 里变方块”，但根因仍然在底层 path 输出。
+## 7. 后续建议
+
+1. CoralUI 可以把 RadioButton 的填充圆、SearchField 的裁剪等 workaround 回退为真正的
+   stroke；根因已在 CoralGraphics 修复。
+2. Lottie 目前不解析 `lc` / `lj`（line cap/join），SVG 已解析但之前被忽略；现在
+   CoralGraphics 已支持，Lottie 解析可以作为下一步。
+3. 非均匀缩放下 stroke 宽度仍按 `scaleOf(transform)` 取一个标量，是文档里已声明的近似；
+   若要在强 skew 下精确，需要把宽度作为椭圆或做设备空间 offset。
+4. hairline（1 device px）仍未实现，`StrokeRec` 会拒绝并让调用方按未描边处理。
+5. CoralUI 的 Layer/damage 缓存仍需单独审查；它能放大帧间缓存问题，但不是 path 几何
+   问题的根源。
