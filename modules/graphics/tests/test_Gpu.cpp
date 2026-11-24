@@ -1104,24 +1104,17 @@ TEST(GpuSurface, ASnapshotWithoutASubmitStillProducesAPicture) {
 }
 
 TEST(GpuSurface, OnePathDoesNotBleedIntoTheNext) {
-  // ## The isolation the scene comparison could not do, and the defect it found
+  // ## Two disjoint paths, and what this does and does not cover
   //
-  // The scene test reported white where red should be. That was consistent with two different defects -- the
-  // white shape drawn in the wrong place, or the red shape *overwritten* -- which have different causes and
-  // different fixes. This separates them, and the answer is the second:
+  // The second path's cover rectangle is its own bounds, so two disjoint rectangles are the case where a stale stencil
+  // *cannot* show through: the cover never overlaps the first path's region. What this pins is therefore the simpler
+  // property that the second path's cover is confined to its own bounds and the first path survives -- and it took the
+  // antialiased route, which for solid paths of this size is the coverage-field route rather than the stencil one.
   //
-  // **Two disjoint opaque rectangles, neither transformed, and the second paints over the first.** The red
-  // rectangle's pixels come back white. So the second path's *cover* pass is not restricted to the second
-  // path's region, which means the stencil the first path accumulated is still in force when the second path
-  // covers -- either the accumulation is additive across paths or the reset pass between them does not zero it.
-  //
-  // That also explains the scene comparison, and it explains why it looked like a shape-order problem: the last
-  // shape in the scene bleeds over every earlier one, so anywhere two shapes overlap the later colour wins
-  // across the earlier shape's whole area rather than only in the overlap.
-  //
-  // The reset pass (`GpuRenderer::drawPath`, `Variant::StencilReset`, `StencilOp::Zero` over the same fan) is
-  // the suspect and the place to look. It is left failing rather than relaxed: this is a wrong picture that a
-  // user would see as their background colour disappearing.
+  // The stencil reset itself is covered by `ANonAntialiasedPathDoesNotBleedIntoTheNext`, where the second path is a
+  // non-antialiased circle whose bounding box *does* contain the first path's pixels. The comment here used to claim
+  // this test failed and blamed the reset; it passes, because disjoint bounds were never the right shape to ask the
+  // question. Both tests are kept: this one says the cover is scissored, the other says the stencil is cleared.
   constexpr int kSize = 32;
   auto surface = graphics::gpu::Surface::make(kSize, kSize);
   if (surface == nullptr) GTEST_SKIP() << "no GPU device could be brought up in this environment";
@@ -1178,6 +1171,154 @@ TEST(GpuSurface, OnePathDoesNotBleedIntoTheNext) {
   // The gap between them stays clear, which is what rules out a cover rectangle spanning the whole target: a
   // cover that is not scissored to the path would paint this pixel with whichever colour ran last.
   EXPECT_EQ((pixelAt(pixels, 16, 6) >> 24) & 0xFFu, 0u) << "the gap between the two paths is untouched";
+}
+
+TEST(GpuSurface, ANonAntialiasedPathDoesNotBleedIntoTheNext) {
+  // ## The stencil route, which the antialiased test above does not reach
+  //
+  // A small solid antialiased path is drawn as a coverage field, so `OnePathDoesNotBleedIntoTheNext` exercises the field
+  // route rather than the stencil one. Turning antialiasing off is what sends a path through stencil-accumulate,
+  // stencil-cover and the stencil reset, and the reset is the pass that has to clear every fragment the accumulation
+  // set. The shape here matters: a circle's cover rectangle is its bounding box, so the pixels in the box but outside
+  // the circle are exactly where a reset that did not run would paint the *previous* path's winding with this path's
+  // colour -- the "icon drawn as a block" symptom.
+  constexpr int kSize = 48;
+  auto surface = graphics::gpu::Surface::make(kSize, kSize);
+  if (surface == nullptr) GTEST_SKIP() << "no GPU device could be brought up in this environment";
+
+  graphics::Canvas* canvas = surface->beginFrame();
+  ASSERT_NE(canvas, nullptr);
+  canvas->clear(graphics::Color::MakeRGBA8(0, 0, 0, 0));
+
+  graphics::Paint red;
+  red.color = graphics::Color::MakeRGBA8(255, 0, 0, 255);
+  red.antiAlias = false;
+  canvas->drawRect(graphics::Rect::MakeLTRB(2.0f, 2.0f, 40.0f, 40.0f), red);
+
+  graphics::Paint white;
+  white.color = graphics::Color::MakeRGBA8(255, 255, 255, 255);
+  white.antiAlias = false;
+  canvas->drawCircle(20.0f, 20.0f, 5.0f, white);
+  ASSERT_TRUE(surface->submit()) << surface->diagnostics();
+
+  const graphics::Bitmap pixels = surface->snapshot();
+  ASSERT_FALSE(pixels.isEmpty());
+  // (15, 15) and (24, 24) are in the circle's bounding box but outside the circle; (20, 20) is its centre.
+  const uint32_t outside = pixelAt(pixels, 15, 15);
+  EXPECT_EQ((outside >> 16) & 0xFFu, 255u) << "the red shape survives outside the circle";
+  EXPECT_EQ((outside >> 8) & 0xFFu, 0u) << "and the second path did not paint its colour over the whole bbox";
+  EXPECT_EQ((pixelAt(pixels, 20, 20) >> 16) & 0xFFu, 255u) << "the circle itself is drawn";
+  EXPECT_EQ((pixelAt(pixels, 8, 8) >> 16) & 0xFFu, 255u) << "and the rest of the first shape is untouched";
+}
+
+TEST(GpuSurface, AnOpenPolylineIsNotClosedByItsStrokeOnTheHardwarePath) {
+  constexpr int kSize = 32;
+  auto surface = graphics::gpu::Surface::make(kSize, kSize);
+  if (surface == nullptr) GTEST_SKIP() << "no GPU device could be brought up in this environment";
+
+  graphics::Canvas* canvas = surface->beginFrame();
+  ASSERT_NE(canvas, nullptr);
+  canvas->clear(graphics::Color::MakeRGBA8(0, 0, 0, 0));
+
+  graphics::Path path;
+  path.moveTo({ 4.0f, 4.0f });
+  path.lineTo({ 24.0f, 4.0f });
+  path.lineTo({ 24.0f, 24.0f });
+
+  graphics::Paint paint;
+  paint.color = graphics::Color::MakeRGBA8(255, 0, 0, 255);
+  paint.style = graphics::Paint::Style::kStroke;
+  paint.strokeWidth = 4.0f;
+  canvas->drawPath(path, paint);
+  ASSERT_TRUE(surface->submit()) << surface->diagnostics();
+
+  const graphics::Bitmap pixels = surface->snapshot();
+  ASSERT_FALSE(pixels.isEmpty());
+  const auto alpha = [&pixels](const int x, const int y) { return (pixelAt(pixels, x, y) >> 24) & 0xFFu; };
+  EXPECT_EQ(alpha(12, 4), 255u) << "the horizontal arm";
+  EXPECT_EQ(alpha(24, 12), 255u) << "the vertical arm";
+  EXPECT_EQ(alpha(12, 12), 0u) << "the middle is empty; a phantom closing edge would ink the diagonal";
+}
+
+TEST(GpuSurface, AStrokedCircleIsASolidRingOnTheHardwarePath) {
+  constexpr int kSize = 32;
+  auto surface = graphics::gpu::Surface::make(kSize, kSize);
+  if (surface == nullptr) GTEST_SKIP() << "no GPU device could be brought up in this environment";
+
+  graphics::Canvas* canvas = surface->beginFrame();
+  ASSERT_NE(canvas, nullptr);
+  canvas->clear(graphics::Color::MakeRGBA8(0, 0, 0, 0));
+
+  graphics::Paint paint;
+  paint.color = graphics::Color::MakeRGBA8(255, 0, 0, 255);
+  paint.style = graphics::Paint::Style::kStroke;
+  paint.strokeWidth = 3.0f;
+  paint.strokeJoin = graphics::Paint::Join::kRound;
+  canvas->drawCircle(16.0f, 16.0f, 10.0f, paint);
+  ASSERT_TRUE(surface->submit()) << surface->diagnostics();
+
+  const graphics::Bitmap pixels = surface->snapshot();
+  ASSERT_FALSE(pixels.isEmpty());
+  const auto alpha = [&pixels](const int x, const int y) { return (pixelAt(pixels, x, y) >> 24) & 0xFFu; };
+  EXPECT_EQ(alpha(16, 6), 255u) << "the top of the ring is fully covered";
+  EXPECT_EQ(alpha(26, 16), 255u) << "and the right of it";
+  EXPECT_EQ(alpha(16, 16), 0u) << "the middle of the circle is not filled";
+}
+
+TEST(GpuSurface, AStrokedCircleIsASolidRingThroughTheStencilRoute) {
+  // The same ring without antialiasing, which is what sends it through stencil-accumulate and cover instead of a
+  // coverage field. The stroke outline is now many separate convex pieces -- edge quads and join discs -- so this also
+  // checks that the stencil route unions them and that its reset leaves nothing behind between them.
+  constexpr int kSize = 32;
+  auto surface = graphics::gpu::Surface::make(kSize, kSize);
+  if (surface == nullptr) GTEST_SKIP() << "no GPU device could be brought up in this environment";
+
+  graphics::Canvas* canvas = surface->beginFrame();
+  ASSERT_NE(canvas, nullptr);
+  canvas->clear(graphics::Color::MakeRGBA8(0, 0, 0, 0));
+
+  graphics::Paint paint;
+  paint.color = graphics::Color::MakeRGBA8(255, 0, 0, 255);
+  paint.style = graphics::Paint::Style::kStroke;
+  paint.strokeWidth = 3.0f;
+  paint.strokeJoin = graphics::Paint::Join::kRound;
+  paint.antiAlias = false;
+  canvas->drawCircle(16.0f, 16.0f, 10.0f, paint);
+  ASSERT_TRUE(surface->submit()) << surface->diagnostics();
+
+  const graphics::Bitmap pixels = surface->snapshot();
+  ASSERT_FALSE(pixels.isEmpty());
+  const auto alpha = [&pixels](const int x, const int y) { return (pixelAt(pixels, x, y) >> 24) & 0xFFu; };
+  EXPECT_EQ(alpha(16, 6), 255u) << "the top of the ring is fully covered";
+  EXPECT_EQ(alpha(26, 16), 255u) << "and the right of it";
+  EXPECT_EQ(alpha(16, 16), 0u) << "the middle of the circle is not filled";
+}
+
+TEST(GpuSurface, AnEvenOddStrokeIsFilledOnTheHardwarePath) {
+  constexpr int kSize = 32;
+  auto surface = graphics::gpu::Surface::make(kSize, kSize);
+  if (surface == nullptr) GTEST_SKIP() << "no GPU device could be brought up in this environment";
+
+  graphics::Canvas* canvas = surface->beginFrame();
+  ASSERT_NE(canvas, nullptr);
+  canvas->clear(graphics::Color::MakeRGBA8(0, 0, 0, 0));
+
+  graphics::Path path;
+  path.setFillType(graphics::FillType::EvenOdd);
+  path.moveTo({ 4.0f, 12.0f });
+  path.lineTo({ 28.0f, 12.0f });
+
+  graphics::Paint paint;
+  paint.color = graphics::Color::MakeRGBA8(255, 0, 0, 255);
+  paint.style = graphics::Paint::Style::kStroke;
+  paint.strokeWidth = 4.0f;
+  canvas->drawPath(path, paint);
+  ASSERT_TRUE(surface->submit()) << surface->diagnostics();
+
+  const graphics::Bitmap pixels = surface->snapshot();
+  ASSERT_FALSE(pixels.isEmpty());
+  EXPECT_EQ((pixelAt(pixels, 16, 12) >> 24) & 0xFFu, 255u)
+          << "a stroke is nonzero even though the path's own fill rule is even-odd";
 }
 
 TEST(GpuSurface, TheTwoRasterisersPutAnEdgeInTheSameRow) {
@@ -5700,6 +5841,73 @@ TEST(GpuSurface, AFieldThatOutgrowsItsSlotRebuildsAndRedrawsTheWholeAtlas) {
   EXPECT_GT(alpha(grown, 31, 20), 0u) << "the changed field was not refilled into its new, larger slot";
   EXPECT_GT(alpha(grown, 65, 65), 0u) << "the unchanged field is missing from the rebuilt atlas";
   EXPECT_EQ(alpha(first, 31, 20), 0u) << "the first frame inked a pixel the rectangle did not cover yet";
+}
+
+TEST(GpuSurface, AFieldThatGrowsAfterAnEarlierFieldChangedIsStillRepacked) {
+  // ## The slot check that used to stop at the first changed field
+  //
+  // A frame is partially refilled when every field's padded box still fits the slot it owned. The loop that decides that
+  // used to stop checking slots as soon as it saw a *content* change, so a frame whose first field changed and whose
+  // *second* field had grown kept the old placement -- and the grown field was refilled into a slot too small for it,
+  // writing over whatever the packer had put beside it. The picture then differs from a cold render of the same scene,
+  // which is exactly what this compares.
+  constexpr int kSize = 128;
+  auto surface = graphics::gpu::Surface::make(kSize, kSize);
+  if (surface == nullptr) GTEST_SKIP() << "no GPU device could be brought up in this environment";
+
+  const auto drawScene = [](graphics::Canvas& canvas, const bool second) {
+    canvas.clear(graphics::Color::MakeRGBA8(8, 8, 8, 255));
+
+    // Field zero: same box in both frames, different shape. Its *content key* changes while its lattice does not, so it
+    // is the change that used to stop the slot check early.
+    graphics::Paint red;
+    red.color = graphics::Color::MakeRGBA8(255, 0, 0, 255);
+    if (second) {
+      canvas.drawRect(graphics::Rect::MakeLTRB(14.0f, 14.0f, 34.0f, 34.0f), red);
+    } else {
+      canvas.drawCircle(24.0f, 24.0f, 10.0f, red);
+    }
+
+    // Field one: small first, then large enough that its padded box cannot fit the slot it owned.
+    graphics::Paint blue;
+    blue.color = graphics::Color::MakeRGBA8(0, 64, 255, 255);
+    canvas.drawRect(second ? graphics::Rect::MakeLTRB(48.0f, 48.0f, 100.0f, 100.0f)
+                           : graphics::Rect::MakeLTRB(48.0f, 48.0f, 60.0f, 60.0f),
+            blue);
+  };
+
+  const auto submitFrame = [&](const bool second) {
+    graphics::Canvas* canvas = surface->beginFrame();
+    if (canvas == nullptr) return graphics::Bitmap {};
+    drawScene(*canvas, second);
+    if (!surface->submit()) return graphics::Bitmap {};
+    return surface->snapshot();
+  };
+
+  const graphics::Bitmap first = submitFrame(false);
+  ASSERT_FALSE(first.isEmpty());
+  ASSERT_EQ(surface->lastFrameCoverageFieldCount(), 2u) << "the scene must produce two fields, or no slot is grown";
+  const graphics::Bitmap warm = submitFrame(true);
+  ASSERT_FALSE(warm.isEmpty());
+
+  auto cold = graphics::gpu::Surface::make(kSize, kSize);
+  if (cold == nullptr) GTEST_SKIP() << "a second device could not be created";
+  graphics::Canvas* coldCanvas = cold->beginFrame();
+  ASSERT_NE(coldCanvas, nullptr);
+  drawScene(*coldCanvas, true);
+  ASSERT_TRUE(cold->submit());
+  const graphics::Bitmap fresh = cold->snapshot();
+  ASSERT_FALSE(fresh.isEmpty());
+
+  const graphics::Pixmap warmPixels = warm.makePixmap();
+  const graphics::Pixmap coldPixels = fresh.makePixmap();
+  ASSERT_EQ(warmPixels.width(), coldPixels.width());
+  for (int y = 0; y < warmPixels.height(); ++y) {
+    for (int x = 0; x < warmPixels.width(); ++x) {
+      ASSERT_EQ(warmPixels.getPixelARGB32(x, y), coldPixels.getPixelARGB32(x, y))
+              << "the partially refilled atlas differs from a cold render at (" << x << ", " << y << ")";
+    }
+  }
 }
 
 /**

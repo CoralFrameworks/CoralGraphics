@@ -22,6 +22,7 @@
 #include "pathops/Curve.h"
 
 #include <cstddef>
+#include <cstdint>
 #include <vector>
 
 /**
@@ -55,11 +56,17 @@ namespace graphics::raster {
  *
  * ## Why it records whether it was closed
  *
- * The rasterizer does not need to know: it treats every contour as closed, because a fill has to have an inside
- * and an open contour is implicitly closed when it is filled. A *measurement* does need to know, because the
- * perimeter of a closed triangle is three edges and that of an open one traced through the same points is two.
- * Carrying the flag here rather than having the measurer re-derive it from the path is what keeps the two
- * consistent, and it is the reason `flattenToPolylines` does not simply always append the closing point.
+ * Three callers need different things from the same points. A *fill* treats every contour as closed, because a fill
+ * has to have an inside and an open contour is implicitly closed when it is filled. A *measurement* needs to know,
+ * because the perimeter of a closed triangle is three edges and that of an open one traced through the same points is
+ * two. A *stroke* needs it for something neither of the other two does: an open contour has caps at its ends and no
+ * edge from the last point back to the first, so emitting that edge (which the first version did) draws a line nobody
+ * asked for.
+ *
+ * Carrying the flag here rather than having each caller re-derive it from the path is what keeps them consistent, and
+ * it is the reason `flattenToPolylines` does not simply always append the closing point. A contour that spells the
+ * return as a final `lineTo` to its start is recorded as closed too: the geometry is the same, and the duplicate point
+ * is dropped, so the flag is the only record that the closing edge exists.
  */
 struct Contour {
   std::vector<Point> points;
@@ -154,27 +161,90 @@ void flattenCubic(const Point& from, const Point& control1, const Point& control
 [[nodiscard]] std::vector<Contour> flattenPath(const pathops::Path& path, FlattenOptions options = {});
 
 /**
- * @return the closed contours of @p path expanded to the region a stroke of @p width would cover.
+ * How the end of an open subpath is finished.
  *
- * The result is a fill: the outline of the stroke, as a set of closed contours. Rasterising it with the
- * nonzero rule gives the stroked shape, which is what lets one rasterizer serve both fill and stroke instead
- * of two.
+ * Mirrors `graphics::Paint::Cap`, but stated here rather than reaching into the painting API: the rasterizer offsets
+ * geometry and knows nothing about colour, blending or shaders, and a stroke's cap is a fact about the outline.
+ */
+enum class StrokeCap : uint8_t {
+  kButt,
+  kRound,
+  kSquare,
+};
+
+/** How the corner where two segments meet is finished. Mirrors `graphics::Paint::Join` for the same reason. */
+enum class StrokeJoin : uint8_t {
+  kMiter,
+  kRound,
+  kBevel,
+};
+
+/**
+ * Everything about a stroke that changes the outline it produces.
+ *
+ * ## Why the width is not the only input any more
+ *
+ * The first version of `strokePath` took a width and hard-coded round joins and round caps. That was not a default, it
+ * was the only possible result -- a caller that set `Paint::strokeCap` to butt, or a `stroke-linejoin="miter"` in an
+ * SVG, silently got round geometry instead. Worse, the pieces it emitted did not all have the same orientation: the
+ * edge quads and the join discs wound in opposite directions, so the nonzero fill that is supposed to union them
+ * instead *cancelled* wherever they overlapped. A stroked circle -- a join at every flattened vertex -- came out as a
+ * faint dashed ring, and a stroked rectangle had a hole at every corner. Passing the full style is what lets the
+ * outline be built consistently instead of guessing.
+ *
+ * @see strokePath
+ */
+struct StrokeStyle {
+  /** The stroke width, in the same units as the path. Non-positive produces no contours. */
+  Scalar width = 0.0f;
+
+  /** The cap applied to the ends of open subpaths. */
+  StrokeCap cap = StrokeCap::kButt;
+
+  /** The join applied where two segments of one contour meet. */
+  StrokeJoin join = StrokeJoin::kMiter;
+
+  /**
+   * The multiple of the width past which a miter is bevelled instead of extended.
+   *
+   * Only read by a miter join. Clamped to at least one by the stroker, because a limit below one would bevel every
+   * corner and is indistinguishable from asking for a bevel.
+   */
+  Scalar miterLimit = 4.0f;
+};
+
+/**
+ * @return the closed contours of @p path expanded to the region a stroke of @p style would cover.
+ *
+ * The result is a fill: the outline of the stroke, as a set of closed contours. Rasterising it with the nonzero rule
+ * gives the stroked shape, which is what lets one rasterizer serve both fill and stroke instead of two.
+ *
+ * ## Every piece is wound the same way, and that is load-bearing
+ *
+ * The outline is emitted as a union of simple, overlapping pieces: one quad per edge, one join per vertex and one cap
+ * per open end. Two things make that union work, and neither is optional:
+ *
+ *  - every piece is emitted with the **same orientation**. The nonzero rule keeps a region covered when the windings
+ *    add, but *cancels* it when they oppose, so a join disc wound against its edge quad punches a transparent hole
+ *    exactly where the two overlap. That was a real defect here: it is invisible on a two-point line (whose edge quad
+ *    is emitted twice, once for each direction, so the double winding survived one disc) and ruins every stroked
+ *    circle and rounded rectangle.
+ *  - the result must be filled with @c FillType::Winding. Under the even-odd rule the overlaps subtract by parity no
+ *    matter which way they are wound. The canvas forces the rule for a stroke for that reason.
+ *
+ * The pieces are kept as separate contours rather than concatenated into one, because consecutive pieces are not
+ * connected: joining them with a segment would cut a chord across the shape.
  *
  * ## The corners
  *
- * Joins and caps are handled as follows, and the choice is visible in the output:
+ * A round join is a disc at the vertex; a bevel is the triangle between the two outer offset points; a miter is the
+ * kite up to the point where the two outer edges meet, kept only while the full miter length stays within
+ * `miterLimit` stroke widths. A round cap is a disc at the end, a square cap extends the band by half a width, and a
+ * butt cap adds nothing -- which is the default, and what a caller that never touched the cap should get.
  *
- *  - **Joins** are round. A round join is an arc, flattened like any other curve; a miter join would need
- *    the miter limit and the spike it produces, and a bevel joint leaves a notch at every corner. Round is
- *    the least surprising default and the only one that needs no extra state in `Paint`.
- *  - **Caps** are butt for an unstroked path, which matches every other graphics API's default: the stroke
- *    ends exactly where the path does rather than extending beyond it.
- *
- * @param width the stroke width in caller units. Non-positive widths produce no contours, because a
- *              zero-width stroke is invisible rather than hairline -- hairline is a separate concept (a
- *              stroke that is one device pixel regardless of transform) and is not implemented here.
+ * @param style the width, cap, join and miter limit. A non-positive width produces no contours.
  */
-[[nodiscard]] std::vector<Contour> strokePath(const pathops::Path& path, Scalar width,
+[[nodiscard]] std::vector<Contour> strokePath(const pathops::Path& path, const StrokeStyle& style,
   FlattenOptions options = {});
 
 } // namespace graphics::raster
