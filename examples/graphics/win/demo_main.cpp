@@ -75,7 +75,7 @@ enum class Renderer {
 
 /** The parsed command line. */
 struct Options {
-  std::string resources = "modules/graphics/resources";
+  std::string resources = "resources";
   std::string output = "coral_graphics_demo.png";
   std::string font;
   std::string image;
@@ -146,7 +146,7 @@ void printUsage() {
   std::cout << "Coral graphics Canvas demo\n\n"
                "  graphics_demo [options]\n\n"
                "Options:\n"
-               "  --resources DIR   where the resource directories live (default: modules/graphics/resources)\n"
+               "  --resources DIR   where the resource directories live (default: resources)\n"
                "  --output FILE     the PNG to write (default: coral_graphics_demo.png)\n"
                "  --backend NAME    raster (default) or gpu -- which renderer draws the scene\n"
                "  --frames N        draw the scene N times through the GPU and report per-frame uploads (default: 1)\n"
@@ -369,7 +369,7 @@ std::filesystem::path resolveSvgDirectory(const Options& options) {
   std::filesystem::path directory = std::filesystem::current_path();
   for (int depth = 0; depth < 8 && !directory.empty(); ++depth) {
     candidates.push_back(directory / options.resources / "apitest" / "SVG");
-    candidates.push_back(directory / "modules" / "graphics" / "resources" / "apitest" / "SVG");
+    candidates.push_back(directory / "resources" / "apitest" / "SVG");
     directory = directory.parent_path();
   }
 
@@ -386,7 +386,7 @@ std::filesystem::path resolveLottie(const Options& options) {
   std::filesystem::path directory = std::filesystem::current_path();
   for (int depth = 0; depth < 8 && !directory.empty(); ++depth) {
     candidates.push_back(directory / options.resources / "apitest" / "lottie" / "gear.json");
-    candidates.push_back(directory / "modules" / "graphics" / "resources" / "apitest" / "lottie" / "gear.json");
+    candidates.push_back(directory / "resources" / "apitest" / "lottie" / "gear.json");
     directory = directory.parent_path();
   }
   return findFile(candidates);

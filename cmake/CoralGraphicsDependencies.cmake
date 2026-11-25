@@ -1,7 +1,7 @@
 # ==================================================================================================
 # CoralGraphics standalone dependencies
 # ==================================================================================================
-# Adds every target that `modules/graphics` and `modules/effect` name in their link lines, so that this
+# Adds every target that the `graphics` and `effect` libraries name in their link lines, so that this
 # repository can be configured on its own:
 #
 #   cmake -S . -B build            # the framework: libraries + tests
@@ -20,7 +20,7 @@
 #
 # The three shared libraries are git submodules here so a standalone checkout is self-contained after
 #
-#   git submodule update --init --recursive
+#   ./scripts/bootstrap.sh   (scripts/bootstrap.ps1 on Windows)
 #
 # When CoralGraphics is added as a subproject, the application has already added its own libz, libyuv,
 # libgtest and CoralCore before this file runs. The `NOT TARGET` guards then skip every bundled copy, so
@@ -43,7 +43,7 @@ option(CORAL_GRAPHICS_SUPPORTS_FONTS "Build the font stack" ON)
 option(CORAL_GRAPHICS_SUPPORTS_JSON "Build the JSON/Lottie reader" ON)
 option(CORAL_BACKEND_SUPPORTS_OPENGL "Build the OpenGL backend" ON)
 # Vulkan is not offered on Apple platforms; see the longer note in the root CMakeLists.txt. Declared here as well because
-# this file runs before the framework root in the examples project.
+# this file runs before CoralGraphics in the examples project.
 if (APPLE)
   if (CORAL_BACKEND_SUPPORTS_VULKAN)
     message(STATUS "CoralGraphics: the Vulkan backend is not offered on Apple platforms; Metal is the Apple backend")
@@ -84,7 +84,7 @@ endif ()
 # pinned copies as git submodules under third_party/, so a standalone configure needs no network access
 # beyond initializing them:
 #
-#   git submodule update --init --recursive
+#   ./scripts/bootstrap.sh   (scripts/bootstrap.ps1 on Windows)
 #
 # When CoralGraphics is added as a subproject, the application has already added these three libraries
 # (and CoralCore) before this file runs. Every `add_subdirectory` below is guarded by `NOT TARGET`, so
@@ -109,7 +109,7 @@ if (NOT TARGET utils)
   else ()
     message(FATAL_ERROR
         "CoralGraphics needs CoralCore for its `utils` and `minilog` targets. Initialize the submodule "
-        "with 'git submodule update --init external/CoralCore', keep a sibling ../CoralCore checkout, "
+        "with 'scripts/bootstrap.sh' (scripts/bootstrap.ps1 on Windows), keep a sibling ../CoralCore checkout, "
         "pass -DCORAL_CORE_DIR=<path>, or add the CoralCore targets before CoralGraphics.")
   endif ()
 endif ()
@@ -133,8 +133,8 @@ if (CORAL_BUILD_TESTS AND NOT TARGET gtest)
 
   if (NOT TARGET gtest)
     message(FATAL_ERROR
-        "CoralGraphics tests need GoogleTest. Initialize this repository's submodules with "
-        "'git submodule update --init --recursive', pass -DCORAL_GTEST_DIR=<path>, point "
+        "CoralGraphics tests need GoogleTest. Run scripts/bootstrap.sh (scripts/bootstrap.ps1 on "
+        "Windows), pass -DCORAL_GTEST_DIR=<path>, point "
         "-DCORAL_SHARED_THIRD_PARTY_DIR at a tree with libgtest, or configure with "
         "-DCORAL_BUILD_TESTS=OFF.")
   endif ()
@@ -161,8 +161,8 @@ if (NOT TARGET z)
 
   if (NOT TARGET z)
     message(FATAL_ERROR
-        "CoralGraphics needs the zlib wrapper (target `z`). Initialize this repository's submodules "
-        "with 'git submodule update --init --recursive', pass "
+        "CoralGraphics needs the zlib wrapper (target `z`). Run scripts/bootstrap.sh "
+        "(scripts/bootstrap.ps1 on Windows), pass "
         "-DCORAL_SHARED_THIRD_PARTY_DIR=<application third_party>, or add the zlib target before "
         "CoralGraphics.")
   endif ()
@@ -179,8 +179,8 @@ if (CORAL_GRAPHICS_WITH_EFFECT AND NOT TARGET yuv)
 
   if (NOT TARGET yuv)
     message(FATAL_ERROR
-        "CoralGraphics' effect module needs libyuv (target `yuv`). Initialize this repository's "
-        "submodules with 'git submodule update --init --recursive', pass "
+        "CoralGraphics' effect module needs libyuv (target `yuv`). Run scripts/bootstrap.sh "
+        "(scripts/bootstrap.ps1 on Windows), pass "
         "-DCORAL_SHARED_THIRD_PARTY_DIR=<application third_party>, add the yuv target before "
         "CoralGraphics, or configure with -DCORAL_GRAPHICS_WITH_EFFECT=OFF.")
   endif ()
@@ -202,7 +202,8 @@ if (NOT TARGET png)
   if (NOT EXISTS "${_coral_vendor}/libpng/coral/CMakeLists.txt")
     message(FATAL_ERROR
         "CoralGraphics needs its vendored third-party tree at ${_coral_vendor}. Initialize the "
-        "third_party submodules, or add the application dependency graph before CoralGraphics.")
+        "third_party checkouts (run scripts/bootstrap.sh), or add the application dependency graph "
+        "before CoralGraphics.")
   endif ()
 
   # The benchmark library is only linked by `effect_hdr_benchmark`, which the test build produces.

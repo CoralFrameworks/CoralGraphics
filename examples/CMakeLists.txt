@@ -4,7 +4,7 @@
 # The framework's demo and verification programs. Two ways to build them:
 #
 #   cmake -S examples -B out/examples ...   # standalone: dependencies, framework, then demos
-#   cmake -S . -B build ...                 # the framework root adds this directory when top-level
+#   cmake -S . -B build ...                 # CoralGraphics adds this directory when top-level
 #
 # As a client of the framework the demos use the public API only -- one include path, no private
 # headers. The graphics demos write a PNG, so they run on a build machine with no display; the windowed
@@ -54,7 +54,7 @@ if (CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR)
 endif ()
 
 # The Linux demos compile the wayland-scanner's generated protocol as C. A standalone configure already
-# enables C through project(); a configure added by the framework root (which is C++-only) needs it here,
+# enables C through project(); a configure added by CoralGraphics (which is C++-only) needs it here,
 # otherwise the generated source has no compiler on a Linux host.
 enable_language(C)
 

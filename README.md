@@ -5,35 +5,67 @@ Lottie readers, the shader toolchain, and the `effect` render-graph module. It i
 roles:
 
 - the application adds it as a framework subproject -- the application has already added CoralCore and
-  the third-party targets, so this root only adds the modules;
+  the third-party targets, so this root only adds the libraries;
 - a standalone checkout configures from this root for independent development, and configures
   `examples/` for the demos.
 
 ## Layout
 
 ```
-modules/graphics/     the framework: facade, backend RHI, geometry, codecs, fonts, SVG/Lottie, tests
-modules/effect/       the effect render-graph module and its tests
+include/              the public headers: gpu/, graphics/, codec/, svg/, lottie/
+src/                  the facade and renderer implementation
+backend/              the RHI and its Vulkan, Metal and OpenGL backends
+geometry/             the value types (include/geometry, src, tests) the facade is written against
+shaders/              the canvas shader sources and their build
+tools/                maintenance, probe and shader-embedding tools
+tests/                the graphics test suite and fixtures
+resources/            fonts, images and documents the tests and demos read
+effect/               the effect render-graph module and its platform nodes
 examples/             the demo and verification project (graphics and effect demos)
+scripts/              bootstrap and build entry points for a standalone checkout
 cmake/                CoralBuild.cmake (the shared settings) and the standalone dependency manifest
 third_party/          the vendored libraries, including the libz / libyuv / libgtest submodules
 external/CoralCore/   the foundation framework, as a submodule
 ```
 
-`modules/graphics/README.md` documents the library's design and rules; `examples/README.md` documents
+`docs/graphics.md` documents the library's design and rules; `examples/README.md` documents
 the demo project.
 
 ## Building standalone
 
-The framework bundles everything it needs as git submodules: CoralCore, the graphics third-party tree,
-and the three libraries that are shared with the other frameworks (`libz`, `libyuv`, `libgtest`) under
-`third_party/`.
+Standalone, this repository fetches the dependencies declared in `.gitmodules` itself. The two scripts
+are the entry points:
 
 ```sh
-git submodule update --init --recursive
+# macOS / Linux: clone or update CoralCore and the shared third-party repositories, then configure,
+# build and test
+./scripts/bootstrap.sh
+./scripts/build.sh --release
+
+# Windows PowerShell
+.\scripts\bootstrap.ps1
+.\scripts\build.ps1 -Configuration Release
 ```
 
-Then configure for the host. Windows and macOS use the generator each one ships with; Linux uses Ninja.
+`build.sh`/`build.ps1` check the same dependency files and call the bootstrap script automatically when
+one is missing, so a fresh clone can go straight to `./scripts/build.sh`. The bootstrap clones a missing
+repository from its default branch, fast-forwards an existing one, and initializes its nested
+repositories. It is idempotent and never discards local changes. Use `--no-bootstrap`/`-NoBootstrap` to
+make the build refuse a missing dependency instead, and `--clean`/`-Clean` to discard the build tree.
+
+What is fetched, and where it goes:
+
+```
+external/CoralCore/    utils, minilog and the foundation framework
+third_party/libz/      zlib wrapper (libpng's dependency)
+third_party/libyuv/    YUV conversion used by the effect input nodes
+third_party/libgtest/  GoogleTest (tests only)
+```
+
+The rest of `third_party/` is vendored in this repository and needs no network access.
+
+After bootstrapping, the same build can be driven with CMake directly. Windows and macOS use the
+generator each one ships with; Linux uses Ninja.
 
 ```sh
 # Windows -- Visual Studio 17 2022
@@ -54,8 +86,9 @@ cmake --build build
 ctest --test-dir build --output-on-failure
 ```
 
-The submodules are pinned commits, so a standalone build is reproducible and needs no network access
-after the initial checkout.
+The bootstrap follows each dependency's default branch, so a build that must be reproducible at an
+exact revision should check the dependency repositories out at the commits it wants before configuring.
+The vendored libraries under `third_party/` are part of this repository's history.
 
 On macOS the prerequisites are the Xcode Command Line Tools (`xcode-select --install`, which also
 provides the Python 3 the shader-embedding step uses) and CMake 3.19 or newer (Homebrew's `cmake`, or
@@ -69,17 +102,13 @@ and `OpenGL 4.1 core` / `CGL`) which is the quickest way to confirm both are rea
 
 ```sh
 # The Metal backend on its own, the way a regression run pins it
-CORAL_RHI_BACKEND=metal ./build/modules/graphics/backend/test_backend
-CORAL_RHI_BACKEND=opengl ./build/modules/graphics/backend/test_backend
+CORAL_RHI_BACKEND=metal ./build/backend/test_backend
+CORAL_RHI_BACKEND=opengl ./build/backend/test_backend
 
 # The whole suite, macOS
 ctest --test-dir build -R "test_(graphics|backend|geometry)|effect_(demo|public_header_boundary)" \
       --output-on-failure
 ```
-
-`modules/graphics/backend/src/metal/` holds the implementation and
-`Metal后端实现进度与问题记录.md` records its status, its design decisions, its verified results on macOS
-and the iOS simulator, and what it does not do yet.
 
 The macOS `ctest` line names this repository's suites rather than running everything: a standalone
 tree also registers the vendored libjpeg-turbo command-line tests, whose executables the codec wrapper
@@ -114,17 +143,17 @@ cmake -S . -B build-ios -G "Unix Makefiles" \
       -DCMAKE_OSX_ARCHITECTURES=arm64 \
       -DCMAKE_OSX_DEPLOYMENT_TARGET=17.0 \
       -DCMAKE_BUILD_TYPE=Release \
-      -DCORAL_SHADERS_COMPILER="$PWD/build/modules/graphics/tools/shader_compiler/shader_compiler"
+      -DCORAL_SHADERS_COMPILER="$PWD/build/tools/shader_compiler/shader_compiler"
 cmake --build build-ios -j8
 ```
 
 Each test target is an `.app` bundle, so run it through the simulator rather than from the host shell:
 
 ```sh
-xcrun simctl spawn booted build-ios/modules/graphics/backend/test_backend.app/test_backend
-xcrun simctl spawn booted build-ios/modules/graphics/test_graphics.app/test_graphics
-xcrun simctl spawn booted build-ios/modules/effect/test_effect.app/test_effect
-xcrun simctl spawn booted build-ios/modules/graphics/geometry/test_geometry.app/test_geometry
+xcrun simctl spawn booted build-ios/backend/test_backend.app/test_backend
+xcrun simctl spawn booted build-ios/test_graphics.app/test_graphics
+xcrun simctl spawn booted build-ios/effect/test_effect.app/test_effect
+xcrun simctl spawn booted build-ios/geometry/test_geometry.app/test_geometry
 ```
 
 `test_backend` prints the negotiated device (`OpenGL ES 3.0`, `EAGL`) and the GPU tests render through
@@ -270,8 +299,7 @@ cmake -S . -B build -G "Unix Makefiles" -DCMAKE_BUILD_TYPE=Release -DCORAL_GRAPH
 cmake --build build -j8 --target effect_spike field_probe canvas_glsl_generator
 ```
 
-The pathops and parser fuzzers build with `-DCORAL_BUILD_TESTS=ON` and live in
-`modules/graphics/tests/fuzz/`.
+The pathops and parser fuzzers build with `-DCORAL_BUILD_TESTS=ON` and live in `tests/fuzz/`.
 
 ## Using it as a subproject
 

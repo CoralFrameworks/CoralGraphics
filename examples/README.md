@@ -2,7 +2,7 @@
 
 Demo and verification programs built as a client of the framework: they include `<graphics/...>`,
 `<gpu/...>` and `<effect/...>` and nothing private. The project configures in two modes: on its own
-(shown below), or as a subdirectory of the framework root, which adds it when the root is top-level.
+(shown below), or as a subdirectory of CoralGraphics, which adds it when the root is top-level.
 This keeps the framework build to libraries and tests while one root configure can still build and test
 every demo.
 
@@ -21,16 +21,18 @@ The framework's dependencies have to exist before the demos name them, the same 
 root adds its dependency graph before its frameworks. `examples/CMakeLists.txt` includes
 `cmake/CoralGraphicsDependencies.cmake` for that reason.
 
-Two checkouts have to be initialized:
+Two checkouts have to be initialized, and the repository's bootstrap script does both:
 
-- **CoralCore** -- `utils` and `minilog`, from the `external/CoralCore` submodule (or a sibling
+- **CoralCore** -- `utils` and `minilog`, from the `external/CoralCore` checkout (or a sibling
   `../CoralCore` checkout, or `-DCORAL_CORE_DIR=<path>`).
-- **`libz`, `libyuv` and `libgtest`** -- this repository's own pinned submodules under `third_party/`.
-  They are shared with the other frameworks, so a project that consumes CoralGraphics as a submodule
-  normally provides its own copies; this project uses the bundled ones when building on its own.
+- **`libz`, `libyuv` and `libgtest`** -- this repository's own checkouts under `third_party/`. They are
+  shared with the other frameworks, so a project that consumes CoralGraphics as a submodule normally
+  provides its own copies; this project uses the bundled ones when building on its own.
 
   ```sh
-  git submodule update --init --recursive
+  # from the repository root, once
+  ./scripts/bootstrap.sh          # macOS / Linux
+  .\scripts\bootstrap.ps1        # Windows
 
   # Windows
   cmake -S examples -B out/examples -G "Visual Studio 17 2022" -A x64
@@ -53,9 +55,9 @@ On Linux the X11/Wayland demos additionally need `libx11-dev`, `libwayland-dev`,
 cmake -S examples -B out/examples -G "Visual Studio 17 2022" -A x64
 cmake --build out/examples --config Release
 
-out/examples/bin/Release/graphics_demo.exe --resources modules/graphics/resources --output demo.png
+out/examples/bin/Release/graphics_demo.exe --resources resources --output demo.png
 out/examples/bin/Release/vulkan_demo.exe --verify --output out/vulkan
-out/examples/bin/Release/lottie_player.exe --animation modules/graphics/resources/apitest/lottie/gear.json
+out/examples/bin/Release/lottie_player.exe --animation resources/apitest/lottie/gear.json
 
 # macOS
 cmake -S examples -B out/examples -G "Unix Makefiles" -DCMAKE_BUILD_TYPE=Release
@@ -145,5 +147,5 @@ ctest --test-dir out/examples --output-on-failure
 | `CORAL_BACKEND_SUPPORTS_VULKAN` | `ON` | Build the Vulkan demo and register its checks |
 | `CORAL_BACKEND_SUPPORTS_SHADERC` / `SPIRV_CROSS` | `ON` | The shader toolchain the framework links against |
 
-The probes and the shader maintenance tools are not demos and are not here: the framework root builds
+The probes and the shader maintenance tools are not demos and are not here: CoralGraphics builds
 them with `-DCORAL_GRAPHICS_BUILD_DEV_TOOLS=ON`.

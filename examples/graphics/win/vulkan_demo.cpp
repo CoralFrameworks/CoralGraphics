@@ -263,19 +263,17 @@ void printDevice(const backend::Device& device) {
 /**
  * @return the first colour-emoji font that exists beside this build, or an empty string.
  *
- * The candidates cover the places this demo is run from: the repository root
- * (`modules/graphics/resources/...`), `modules/graphics` itself (`resources/...`, for a manual run), and a
- * build directory one or more levels below the root (which is where CTest starts it). A demo that
- * silently skipped the emoji check because it looked in one place would be a check that passes for
- * the wrong reason.
+ * The candidates cover the places this demo is run from: the framework root (`resources/...`), a
+ * build directory one or more levels below it (which is where CTest starts it), and the executable's
+ * own directory. A demo that silently skipped the emoji check because it looked in one place would be
+ * a check that passes for the wrong reason.
  */
 std::string findEmojiFont() {
   const std::vector<std::filesystem::path> candidates = {
     std::filesystem::path("resources") / "fonts" / "NotoColorEmoji.ttf",
-    std::filesystem::path("modules/graphics/resources") / "fonts" / "NotoColorEmoji.ttf",
-    std::filesystem::path("../modules/graphics/resources") / "fonts" / "NotoColorEmoji.ttf",
-    std::filesystem::path("../../modules/graphics/resources") / "fonts" / "NotoColorEmoji.ttf",
-    std::filesystem::path("../../../modules/graphics/resources") / "fonts" / "NotoColorEmoji.ttf",
+    std::filesystem::path("../resources") / "fonts" / "NotoColorEmoji.ttf",
+    std::filesystem::path("../../resources") / "fonts" / "NotoColorEmoji.ttf",
+    std::filesystem::path("../../../resources") / "fonts" / "NotoColorEmoji.ttf",
   };
   for (const std::filesystem::path& candidate: candidates) {
     if (std::filesystem::exists(candidate)) return candidate.string();
@@ -285,7 +283,7 @@ std::string findEmojiFont() {
     // executable from; walk up to the repository root and try the source resource directory.
     for (const char* up: { "../../../../", "../../../" }) {
       const std::filesystem::path candidate =
-        g_executableDirectory / up / "modules" / "graphics" / "resources" / "fonts" / "NotoColorEmoji.ttf";
+        g_executableDirectory / up / "resources" / "fonts" / "NotoColorEmoji.ttf";
       if (std::filesystem::exists(candidate)) return candidate.lexically_normal().string();
     }
   }

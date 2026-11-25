@@ -94,7 +94,7 @@ endif ()
 # the demo writes a PNG and runs on a build machine, in a container, or in a session with no display.
 # Putting a message loop inside it would make it fail on exactly the machines where it is most useful.
 #
-#   out/examples/bin/Release/lottie_player.exe --animation modules/graphics/resources/apitest/lottie/gear.json
+#   out/examples/bin/Release/lottie_player.exe --animation resources/apitest/lottie/gear.json
 #   out/examples/bin/Release/lottie_player.exe --backend gpu --gpu-api gl --frames 60
 #
 # Where there is no window implementation the source compiles to a program that explains what a port

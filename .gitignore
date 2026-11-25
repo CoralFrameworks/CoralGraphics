@@ -11,3 +11,9 @@ toolchains
 /out*
 /build
 /build-*
+
+# Dependency checkouts fetched by scripts/bootstrap.sh (declared in .gitmodules, not tracked)
+external/
+third_party/libz/
+third_party/libyuv/
+third_party/libgtest/

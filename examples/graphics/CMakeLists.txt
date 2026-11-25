@@ -8,7 +8,7 @@
 # The project is configured from examples/, not from these directories, because the dependencies and
 # the framework target have to exist before any demo names them.
 
-set(CORALGRAPHICS_RESOURCES "${CORALGRAPHICS_ROOT}/modules/graphics/resources")
+set(CORALGRAPHICS_RESOURCES "${CORALGRAPHICS_ROOT}/resources")
 
 if (WIN32)
   add_subdirectory(win)
