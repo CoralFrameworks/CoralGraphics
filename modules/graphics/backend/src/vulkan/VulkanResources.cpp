@@ -1149,6 +1149,10 @@ bool VulkanDevice::supportsNativeTextureImport(const NativeTextureKind kind) con
       // Android build of the loader.
       return false;
 #endif
+    case NativeTextureKind::IOSurface:
+      // An IOSurface is an Apple shared-surface object with no Vulkan external-memory handle type; only the
+      // Metal backend can import it.
+      return false;
   }
   return false;
 }

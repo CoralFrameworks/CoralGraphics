@@ -163,6 +163,41 @@ if (WIN32 AND NOT ANDROID)
 endif ()
 
 # ==================================================================================================
+# Apple platform target
+# ==================================================================================================
+# An IOSurface is the Apple zero-copy frame object: a decoder, a camera, a `CVPixelBuffer`, or another
+# renderer hands one over and the engine samples/writes it in place. The nodes live in their own target for
+# the same reason the Android and Windows ones do: the core `effect` target names no platform type, and an
+# application that never touches an IOSurface does not link the platform frameworks.
+#
+# The implementation is Objective-C++ because Core Video (the iOS OpenGL bridge) and IOSurface are
+# Objective-C-visible frameworks; the macOS CGL path lives in the same file behind a target conditional.
+if (APPLE)
+  add_library(effect_apple STATIC
+      include/effect/platform/apple/AppleIOSurfaceInputNode.h
+      include/effect/platform/apple/AppleIOSurfaceOutputNode.h
+      src/platform/apple/AppleIOSurfaceGL.h
+      src/platform/apple/AppleIOSurfaceGL.mm
+      src/platform/apple/AppleIOSurfaceInputNode.mm
+      src/platform/apple/AppleIOSurfaceOutputNode.mm
+  )
+  target_include_directories(effect_apple
+      PUBLIC $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/${PUBLIC_HDR_DIR}>
+      PUBLIC $<INSTALL_INTERFACE:include>
+      # The platform nodes implement the internal InputRuntime/OutputRuntime interfaces, so this target
+      # sees `src/`.
+      PRIVATE ${PRIVATE_HDR_DIR} ${SRC_DIR} ${SRC_DIR}/effect
+  )
+  find_library(IOSURFACE_FRAMEWORK IOSurface REQUIRED)
+  find_library(COREVIDEO_FRAMEWORK CoreVideo REQUIRED)
+  target_link_libraries(effect_apple PUBLIC ${TARGET} $<BUILD_INTERFACE:${IOSURFACE_FRAMEWORK}>)
+  # Core Video is only reached on iOS (CVOpenGLESTextureCache); linking it on macOS too keeps the target's
+  # dependency list one list rather than a per-platform conditional the build would have to keep in sync.
+  target_link_libraries(effect_apple PRIVATE $<BUILD_INTERFACE:${COREVIDEO_FRAMEWORK}> minilog)
+  set_target_properties(effect_apple PROPERTIES FOLDER Libs)
+endif ()
+
+# ==================================================================================================
 # Linux X11 platform target
 # ==================================================================================================
 if (LINUX)
@@ -208,6 +243,11 @@ endif ()
 if (WIN32 AND NOT ANDROID)
   install(TARGETS effect_win ARCHIVE DESTINATION lib)
   install(DIRECTORY ${PUBLIC_HDR_DIR}/${TARGET}/platform/win
+      DESTINATION include/${TARGET}/platform)
+endif ()
+if (APPLE)
+  install(TARGETS effect_apple ARCHIVE DESTINATION lib)
+  install(DIRECTORY ${PUBLIC_HDR_DIR}/${TARGET}/platform/apple
       DESTINATION include/${TARGET}/platform)
 endif ()
 if (LINUX)
@@ -303,6 +343,14 @@ if (CORAL_BUILD_TESTS)
     target_link_libraries(test_${TARGET} PRIVATE effect_win d3d11 dxgi opengl32)
     # The crash handler symbolizes stacks with dbghelp; only the Windows test binary needs it.
     target_link_libraries(test_${TARGET} PRIVATE dbghelp)
+  endif ()
+
+  # The IOSurface tests create a real surface, feed it to the engine and read it back, so they link the
+  # platform target. They are host-only: the suite runs on macOS, and the Apple nodes compile for the iOS
+  # cross build without the test binary there.
+  if (APPLE AND TARGET effect_apple)
+    target_sources(test_${TARGET} PRIVATE tests/test_AppleIOSurface.cpp)
+    target_link_libraries(test_${TARGET} PRIVATE effect_apple)
   endif ()
 
   # The header-level benchmark stays with the module: it measures the engine itself rather than

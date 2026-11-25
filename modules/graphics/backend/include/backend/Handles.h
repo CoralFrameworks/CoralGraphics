@@ -199,6 +199,26 @@ enum class NativeTextureKind : uint32_t {
   AndroidHardwareBuffer = 2,
   /** A VkImage created on the same device, wrapped without owning its memory. */
   VulkanImage = 3,
+  /**
+   * An `IOSurfaceRef`, the Apple shared-surface object a video decoder, a camera, a
+   * `CVPixelBuffer`, or another Metal/OpenGL renderer hands to this process.
+   *
+   * macOS and iOS only. The Metal backend imports the surface as an `id<MTLTexture>` through
+   * `newTextureWithDescriptor:iosurface:plane:`, so sampling (and, with `writeback`, copying into)
+   * it touches the producer's storage directly. `platformHandle` is the borrowed `IOSurfaceRef`;
+   * the imported texture retains it, so the caller may release its own reference as soon as the
+   * import returned.
+   *
+   * The surface must describe a single-plane RGBA8/BGRA8/RGBA16F image. A bi-planar YUV video
+   * surface (NV12/420f) is **not** importable as one texture; the producer has to convert it, or a
+   * future YUV import has to add both plane textures and a conversion sampler.
+   *
+   * Only the Metal backend implements this kind. macOS's OpenGL cannot bind an IOSurface as a
+   * `GL_TEXTURE_2D` (`CGLTexImageIOSurface2D` accepts `GL_TEXTURE_RECTANGLE_ARB` only), so
+   * `supportsNativeTextureImport(IOSurface)` is false on OpenGL and the Apple OpenGL effect nodes
+   * bridge the surface themselves instead of asking the RHI to.
+   */
+  IOSurface = 4,
 };
 
 /**
@@ -219,6 +239,10 @@ enum class NativeTextureKind : uint32_t {
  *    kind yet, so the ownership rule is stated for the implementation that lands: the backend takes its
  *    own reference (`AHardwareBuffer_acquire`) for as long as the texture lives, and the caller keeps
  *    ownership of the reference it passed in.
+ *  - `IOSurface`: `platformHandle` is a borrowed `IOSurfaceRef`. The imported Metal texture retains
+ *    the surface itself, so the caller may release its reference once the import returned; the RHI
+ *    never calls `IOSurfaceRelease`. A surface whose contents change while it is being sampled is a
+ *    producer/consumer race the RHI cannot see, exactly as with `Direct3D11Texture`.
  */
 struct NativeTextureDescriptor {
   uint32_t glTarget = 0;
@@ -234,6 +258,14 @@ struct NativeTextureDescriptor {
   /** Optional VkImageView for VulkanImage; the backend creates one when null. */
   void* platformView = nullptr;
   /**
+   * Plane index inside the platform object: the IOSurface plane for `IOSurface`, 0 elsewhere.
+   *
+   * A single-plane RGBA/BGRA surface uses plane 0. A bi-planar video surface would name plane 0
+   * (luma) or plane 1 (chroma), which is why the field exists even though one-texture imports only
+   * use plane 0 today.
+   */
+  uint32_t plane = 0;
+  /**
    * Set when the platform image is a YUV image (an Android hardware buffer in NV12, for instance): the
    * imported texture then has an external format and can only be read through a sampler that carries this.
    */
@@ -244,7 +276,9 @@ struct NativeTextureDescriptor {
    * A decoder texture is only ever sampled, which is why the default import is not a copy destination.
    * An encoder texture is the other direction - the graph's final frame is copied into it and the
    * consumer reads it without a CPU round trip - so it needs `TransferDst` (and the platform texture
-   * has to be created with the matching bind flags).
+   * has to be created with the matching bind flags). For `IOSurface`, a writeback import returns a
+   * texture the Metal backend accepts as a blit destination; the effect output node copies the final
+   * frame into it, so the surface's own storage holds the frame.
    */
   bool writeback = false;
 };
