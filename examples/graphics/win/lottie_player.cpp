@@ -29,7 +29,7 @@
  *
  * The project vendors no windowing toolkit -- `third_party/libsdl2` is an empty directory skeleton -- and the task asks
  * for no new dependency. So this uses the platform directly. Everything platform-specific is in this file and touches
- * nothing in `modules/graphics`, which is what makes a second implementation for another platform a new file rather than a
+ * nothing in `CoralGraphics`, which is what makes a second implementation for another platform a new file rather than a
  * change to the library.
  *
  * The three things the platform has to provide are a surface of pixels, a way to blit them, and a clock:
@@ -409,7 +409,6 @@ std::filesystem::path resolveAnimation(const std::string& requested) {
   for (int depth = 0; depth < 8 && !directory.empty(); ++depth) {
     std::vector<std::filesystem::path> candidates {
       directory / "resources" / "apitest" / "lottie" / "gear.json",
-      directory / "modules" / "graphics" / "resources" / "apitest" / "lottie" / "gear.json",
     };
     for (const std::filesystem::path& candidate : candidates) {
       std::error_code failure;
