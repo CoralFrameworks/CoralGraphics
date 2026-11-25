@@ -507,11 +507,15 @@ if (CORAL_BACKEND_SUPPORTS_METAL)
   # CoreGraphics owns CGColorSpace, which is how CAMetalLayer is told whether its drawable is sRGB,
   # Display P3, extended-linear P3 or PQ.
   find_library(COREGRAPHICS_FRAMEWORK CoreGraphics REQUIRED)
+  # IOSurface is the shared-surface object the Metal backend wraps as an `id<MTLTexture>` for zero-copy
+  # video frames; it is also what a CVPixelBuffer is backed by.
+  find_library(IOSURFACE_FRAMEWORK IOSurface REQUIRED)
   target_link_libraries(${TARGET} PUBLIC
       $<BUILD_INTERFACE:${METAL_FRAMEWORK}>
       $<BUILD_INTERFACE:${QUARTZCORE_FRAMEWORK}>
       $<BUILD_INTERFACE:${FOUNDATION_FRAMEWORK}>
       $<BUILD_INTERFACE:${COREGRAPHICS_FRAMEWORK}>
+      $<BUILD_INTERFACE:${IOSURFACE_FRAMEWORK}>
   )
 endif ()
 

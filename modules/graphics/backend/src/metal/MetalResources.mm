@@ -22,6 +22,8 @@
 
 #include <backend/Validation.h>
 
+#include <IOSurface/IOSurface.h>
+
 #include <algorithm>
 #include <cstring>
 #include <limits>
@@ -1524,20 +1526,91 @@ NativeBuffer MetalDevice::getNativeBuffer(const BufferHandle bufferHandle) const
 }
 
 Result MetalDevice::importNativeTexture(const NativeTextureDescriptor& descriptor, TextureHandle* outTexture) {
-  (void) descriptor;
-  if (outTexture != nullptr) *outTexture = TextureHandle::invalid();
-  // The RHI's importable kinds are a GL name, a Direct3D 11 shared handle and an AHardwareBuffer. Metal's zero-copy
-  // paths are IOSurface and CVMetalTextureCache, which the RHI has no kind for; adding one is an RHI change rather
-  // than a backend detail, so this answers honestly instead of guessing from a `void*`.
-  emitMessage(MessageSeverity::Warning,
-          "the Metal backend has no native texture import; IOSurface/CVMetalTextureCache would need a new "
-          "NativeTextureKind in the RHI");
-  return Result::Unsupported;
+  if (outTexture == nullptr) return Result::InvalidArgument;
+  *outTexture = TextureHandle::invalid();
+
+  if (descriptor.kind != NativeTextureKind::IOSurface) {
+    // The RHI's other importable kinds are a GL name, a Direct3D 11 shared handle and an AHardwareBuffer, none of
+    // which exists on an Apple platform. Answering honestly is what lets a caller fall back to an upload instead of
+    // building a descriptor that can only fail.
+    emitMessage(MessageSeverity::Warning,
+            "the Metal backend imports IOSurface only; the requested NativeTextureKind is not available here");
+    return Result::Unsupported;
+  }
+  if (descriptor.platformHandle == nullptr) return Result::InvalidArgument;
+
+  IOSurfaceRef surface = static_cast<IOSurfaceRef>(descriptor.platformHandle);
+  const MTLPixelFormat pixelFormat = toMtlPixelFormat(descriptor.format);
+  if (pixelFormat == MTLPixelFormatInvalid) {
+    emitMessage(MessageSeverity::Error,
+            "the Metal backend cannot import an IOSurface in the requested pixel format (supported: RGBA8, BGRA8, "
+            "RGBA16F)");
+    return Result::Unsupported;
+  }
+
+  // The surface owns the extent; a descriptor that disagrees names the wrong image. Deriving the size when the caller
+  // left it zero is the useful default, and refusing a mismatch is better than importing an image of a different
+  // shape than the frame metadata promises.
+  const uint32_t surfaceWidth = static_cast<uint32_t>(IOSurfaceGetWidth(surface));
+  const uint32_t surfaceHeight = static_cast<uint32_t>(IOSurfaceGetHeight(surface));
+  if (descriptor.width != 0 && descriptor.width != surfaceWidth) {
+    emitMessage(MessageSeverity::Error,
+            "the IOSurface is " + std::to_string(surfaceWidth) + " pixels wide but the descriptor says " +
+                    std::to_string(descriptor.width));
+    return Result::InvalidArgument;
+  }
+  if (descriptor.height != 0 && descriptor.height != surfaceHeight) {
+    emitMessage(MessageSeverity::Error,
+            "the IOSurface is " + std::to_string(surfaceHeight) + " pixels high but the descriptor says " +
+                    std::to_string(descriptor.height));
+    return Result::InvalidArgument;
+  }
+  if (surfaceWidth == 0 || surfaceHeight == 0) return Result::InvalidArgument;
+
+  MTLTextureDescriptor* native = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:pixelFormat
+                                                                                   width:surfaceWidth
+                                                                                  height:surfaceHeight
+                                                                               mipmapped:NO];
+  // Sampling is the only usage the RHI promises for an imported texture. A writeback import is filled by a blit
+  // encoder, which needs no usage flag, so asking for `ShaderWrite` would only narrow the set of surfaces the
+  // driver accepts without enabling anything this path uses.
+  native.usage = MTLTextureUsageShaderRead;
+  // An IOSurface is host-visible memory owned by the producer, which is what makes the import zero-copy.
+  native.storageMode = MTLStorageModeShared;
+
+  id<MTLTexture> texture = [mDevice newTextureWithDescriptor:native
+                                                    iosurface:surface
+                                                        plane:descriptor.plane];
+  if (texture == nil) {
+    emitMessage(MessageSeverity::Error,
+            "the Metal device could not wrap the IOSurface (" + std::to_string(surfaceWidth) + "x" +
+                    std::to_string(surfaceHeight) + ", " + getPixelFormatInfo(descriptor.format).name +
+                    ") as a texture; the driver rejects that pixel format, plane or row alignment");
+    return Result::Unsupported;
+  }
+
+  MetalTexture payload;
+  payload.texture = texture;
+  payload.type = MTLTextureType2D;
+  payload.format = descriptor.format;
+  payload.size = { surfaceWidth, surfaceHeight, 1 };
+  payload.mipLevelCount = 1;
+  payload.sampleCount = 1;
+  TextureUsages importedUsage = TextureUsage::Sampled | TextureUsage::External;
+  if (descriptor.writeback) importedUsage = importedUsage | TextureUsage::Storage;
+  payload.usage = static_cast<TextureUsages>(importedUsage);
+  payload.bytes = getFormatByteSize(descriptor.format, surfaceWidth, surfaceHeight);
+  // The texture object keeps a reference to the IOSurface, so the caller's own reference is not needed once the import
+  // has returned; that is the ownership rule `NativeTextureDescriptor` documents for this kind.
+
+  *outTexture = mTextures.allocate(std::move(payload));
+  if (!outTexture->valid()) return Result::OutOfMemory;
+  mResidentTextureBytes += getFormatByteSize(descriptor.format, surfaceWidth, surfaceHeight);
+  return Result::Success;
 }
 
 bool MetalDevice::supportsNativeTextureImport(const NativeTextureKind kind) const {
-  (void) kind;
-  return false;
+  return kind == NativeTextureKind::IOSurface;
 }
 
 } // namespace backend::metal
