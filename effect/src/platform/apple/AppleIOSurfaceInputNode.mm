@@ -48,6 +48,11 @@ struct AppleIOSurfaceInputNode::State {
     bool hasTimestamp = false;
     bool bt709 = true;
     bool fullRange = false;
+    bool p010 = false;
+    bool hdr = false;
+    EffectHdrTransfer hdrTransfer = EffectHdrTransfer::PQ;
+    uint32_t maxCll = 0;
+    uint32_t maxFall = 0;
     uint64_t version = 0;
     std::shared_ptr<void> lifetime;
   };
@@ -123,13 +128,17 @@ bool isBiPlanarYuvSurface(const IOSurfaceRef surface) noexcept {
 bool isNv12Surface(const IOSurfaceRef surface) noexcept {
   if (surface == nullptr) return false;
   const uint32_t format = static_cast<uint32_t>(IOSurfaceGetPixelFormat(surface));
-  // '420v' (video range) and '420f' (full range).
-  return format == 0x34323076u || format == 0x34323066u;
+  // '420v'/'420f' (8-bit video/full range) and 'x420' (10-bit P010 video range).
+  return format == 0x34323076u || format == 0x34323066u || format == 0x78343230u;
 }
 
 /** Whether the surface's NV12 samples are full range ('420f'). */
 bool isFullRangeNv12(const IOSurfaceRef surface) noexcept {
   return surface != nullptr && static_cast<uint32_t>(IOSurfaceGetPixelFormat(surface)) == 0x34323066u;
+}
+
+bool isP010Surface(const IOSurfaceRef surface) noexcept {
+  return surface != nullptr && static_cast<uint32_t>(IOSurfaceGetPixelFormat(surface)) == 0x78343230u;
 }
 
 /** The node's public entry points all agree on what a valid surface/format/extent is. */
@@ -322,7 +331,7 @@ private:
       return false;
     }
     if (queued.surface == nullptr || !isNv12Surface(queued.surface)) {
-      error = "the submitted IOSurface is not 8-bit bi-planar NV12";
+      error = "the submitted IOSurface is not bi-planar 4:2:0";
       return false;
     }
 
@@ -348,7 +357,8 @@ private:
     lumaDescriptor.platformHandle = queued.surface;
     lumaDescriptor.width = queued.width;
     lumaDescriptor.height = queued.height;
-    lumaDescriptor.format = backend::PixelFormat::R8_UNORM;
+    lumaDescriptor.format = queued.p010 ? backend::PixelFormat::R16_UNORM
+                                        : backend::PixelFormat::R8_UNORM;
     lumaDescriptor.plane = 0;
     backend::Result result = mDevice->importNativeTexture(lumaDescriptor, &luma);
     if (!backend::isSuccess(result) || !luma.valid()) {
@@ -362,7 +372,8 @@ private:
     chromaDescriptor.platformHandle = queued.surface;
     chromaDescriptor.width = chromaWidth;
     chromaDescriptor.height = chromaHeight;
-    chromaDescriptor.format = backend::PixelFormat::R8G8_UNORM;
+    chromaDescriptor.format = queued.p010 ? backend::PixelFormat::R16G16_UNORM
+                                          : backend::PixelFormat::R8G8_UNORM;
     chromaDescriptor.plane = 1;
     result = mDevice->importNativeTexture(chromaDescriptor, &chroma);
     if (!backend::isSuccess(result) || !chroma.valid()) {
@@ -378,8 +389,9 @@ private:
     mNv12Textures[1] = chroma;
     mNv12Lifetime = queued.lifetime;
 
-    if (!context.core->convertYuvNv12Textures(context.commands, luma, chroma, queued.width, queued.height,
-            queued.bt709, queued.fullRange, mConverted, error)) {
+    if (!context.core->convertYuvNv12Textures(context.commands, luma, chroma, queued.width,
+            queued.height, queued.bt709, queued.fullRange, queued.p010, queued.hdr,
+            queued.hdrTransfer, queued.maxCll, queued.maxFall, mConverted, error)) {
       return false;
     }
     mConvertedVersion = queued.version;
@@ -589,7 +601,8 @@ uint32_t AppleIOSurfaceInputNode::height() const noexcept {
 EffectResult AppleIOSurfaceInputNode::submitSurface(
     IOSurfaceRef const surface, const uint32_t width, const uint32_t height,
     const EffectPixelFormat format, const RenderTime timestamp, std::shared_ptr<void> lifetime,
-    const bool bt709, const bool fullRange) {
+    const bool bt709, const bool fullRange, const bool p010, const bool hdr,
+    const EffectHdrTransfer hdrTransfer, const uint32_t maxCll, const uint32_t maxFall) {
   if (!isSupportedFormat(format)) return EffectResult::Unsupported;
   if (!validDescription(surface, width, height, format)) return EffectResult::InvalidArgument;
 
@@ -608,6 +621,11 @@ EffectResult AppleIOSurfaceInputNode::submitSurface(
   queued.format = format;
   queued.bt709 = bt709;
   queued.fullRange = fullRange;
+  queued.p010 = p010 || isP010Surface(surface);
+  queued.hdr = hdr;
+  queued.hdrTransfer = hdrTransfer;
+  queued.maxCll = maxCll;
+  queued.maxFall = maxFall;
   queued.version = ++mState->version;
   queued.timestamp = timestamp;
   queued.hasTimestamp = timestamp.isValid();
@@ -676,7 +694,8 @@ EffectResult AppleIOSurfaceInputNode::submit(const PixelBufferView& view) {
     return EffectResult::Busy;
   }
   return submitSurface(static_cast<IOSurfaceRef>(view.nativeHandle), view.width, view.height,
-    view.format, view.timestamp, view.lifetime, view.bt709, view.fullRange);
+    view.format, view.timestamp, view.lifetime, view.bt709, view.fullRange, view.p010, view.hdr,
+    view.hdrTransfer, view.hdrMaxContentLightLevel, view.hdrMaxFrameAverageLightLevel);
 }
 
 void AppleIOSurfaceInputNode::setTimestamp(const RenderTime timestamp) {

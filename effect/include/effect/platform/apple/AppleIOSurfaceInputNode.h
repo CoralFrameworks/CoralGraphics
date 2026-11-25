@@ -141,7 +141,10 @@ private:
 
   EffectResult submitSurface(IOSurfaceRef surface, uint32_t width, uint32_t height,
                              EffectPixelFormat format, RenderTime timestamp,
-                             std::shared_ptr<void> lifetime, bool bt709, bool fullRange);
+                             std::shared_ptr<void> lifetime, bool bt709, bool fullRange,
+                             bool p010 = false, bool hdr = false,
+                             EffectHdrTransfer hdrTransfer = EffectHdrTransfer::PQ,
+                             uint32_t maxCll = 0, uint32_t maxFall = 0);
 
   std::shared_ptr<State> mState;
 };

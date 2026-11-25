@@ -902,7 +902,9 @@ public:
    */
   bool convertYuvNv12Textures(backend::CommandBuffer* commands, backend::TextureHandle y,
                               backend::TextureHandle uv, uint32_t width, uint32_t height, bool bt709,
-                              bool fullRange, FrameLease& out, std::string& error);
+                              bool fullRange, bool p010, bool hdr,
+                              EffectHdrTransfer hdrTransfer, uint32_t maxCll, uint32_t maxFall,
+                              FrameLease& out, std::string& error);
 
   bool convertYuv420(backend::CommandBuffer* commands, uint32_t width, uint32_t height, const uint8_t* y,
           uint32_t yRowBytes, const uint8_t* u, uint32_t uRowBytes, const uint8_t* v, uint32_t vRowBytes,
@@ -1024,6 +1026,11 @@ private:
   RenderProgram* mNv12Program = nullptr;
   bool mNv12Bt709 = false;
   bool mNv12FullRange = false;
+  bool mNv12P010 = false;
+  bool mNv12Hdr = false;
+  EffectHdrTransfer mNv12HdrTransfer = EffectHdrTransfer::PQ;
+  uint32_t mNv12MaxCll = 0;
+  uint32_t mNv12MaxFall = 0;
   bool mYuvBt709 = false;
   bool mYuvFullRange = false;
   bool mYuvP010 = false;

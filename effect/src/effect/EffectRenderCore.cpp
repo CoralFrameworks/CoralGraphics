@@ -653,6 +653,11 @@ void RenderCore::destroySharedResources() noexcept {
   mNv12Program = nullptr;
   mNv12Bt709 = false;
   mNv12FullRange = false;
+  mNv12P010 = false;
+  mNv12Hdr = false;
+  mNv12HdrTransfer = EffectHdrTransfer::PQ;
+  mNv12MaxCll = 0;
+  mNv12MaxFall = 0;
   mYuvBt709 = false;
   mYuvFullRange = false;
   mYuvP010 = false;
@@ -1173,28 +1178,64 @@ bool RenderCore::topDownTargets() const noexcept {
 
 bool RenderCore::convertYuvNv12Textures(backend::CommandBuffer* const commands,
         const backend::TextureHandle y, const backend::TextureHandle uv, const uint32_t width,
-        const uint32_t height, const bool bt709, const bool fullRange, FrameLease& out,
-        std::string& error) {
+        const uint32_t height, const bool bt709, const bool fullRange, const bool p010,
+        const bool hdr, const EffectHdrTransfer hdrTransfer, const uint32_t maxCll,
+        const uint32_t maxFall, FrameLease& out, std::string& error) {
   if (commands == nullptr || mDevice == nullptr || !y.valid() || !uv.valid()) {
     error = "the NV12 conversion has no command buffer or plane textures";
     return false;
   }
-  if (mNv12Program == nullptr || mNv12Bt709 != bt709 || mNv12FullRange != fullRange) {
+  if (mNv12Program == nullptr || mNv12Bt709 != bt709 || mNv12FullRange != fullRange ||
+      mNv12P010 != p010 || mNv12Hdr != hdr || mNv12HdrTransfer != hdrTransfer ||
+      mNv12MaxCll != maxCll || mNv12MaxFall != maxFall) {
     auto snapshot = std::make_shared<ProgramSnapshot>();
     snapshot->desc.name = "effect/yuv-nv12-gpu";
     snapshot->desc.authoring = EffectShaderAuthoring::Body;
     snapshot->desc.inputCount = 2;
-    const std::string luma = std::string("      float yy = (texture(uInput0, uv).r * 255.0 - ") +
-            (fullRange ? "0.0" : "16.0") + ") * " + (fullRange ? "1.0" : "1.164") + ";\n";
-    const std::string chroma =
-            "      vec2 cc = texture(uInput1, uv).rg * 255.0 - 128.0;\n";
-    const std::string matrix = std::string("      vec3 rgb = vec3(yy + ") +
-            (bt709 ? "1.793" : "1.596") + " * cc.y, yy " +
-            (bt709 ? "- 0.213" : "- 0.391") + " * cc.x " +
-            (bt709 ? "- 0.533" : "- 0.813") + " * cc.y, yy + " +
-            (bt709 ? "2.112" : "2.018") + " * cc.x) / 255.0;\n";
-    snapshot->desc.fragmentSource = luma + chroma + matrix +
-            "      return vec4(clamp(rgb, 0.0, 1.0), 1.0);\n";
+    std::string body;
+    if (p010) {
+      // P010 is always limited range: 10-bit luma 64..940 and chroma 64..960.
+      body = "      float yy = (texture(uInput0, uv).r * 1023.0 - 64.0) / 876.0;\n"
+             "      float uu = (texture(uInput1, uv).r * 1023.0 - 512.0) / 896.0;\n"
+             "      float vv = (texture(uInput1, uv).g * 1023.0 - 512.0) / 896.0;\n"
+             "      vec3 rgb = vec3(yy + 1.4746 * vv, yy - 0.16455 * uu - 0.57135 * vv,"
+             " yy + 1.8814 * uu);\n";
+    } else {
+      const std::string luma = std::string("      float yy = (texture(uInput0, uv).r * 255.0 - ") +
+              (fullRange ? "0.0" : "16.0") + ") * " + (fullRange ? "1.0" : "1.164") + ";\n";
+      const std::string chroma =
+              "      vec2 cc = texture(uInput1, uv).rg * 255.0 - 128.0;\n";
+      const std::string matrix = std::string("      vec3 rgb = vec3(yy + ") +
+              (bt709 ? "1.793" : "1.596") + " * cc.y, yy " +
+              (bt709 ? "- 0.213" : "- 0.391") + " * cc.x " +
+              (bt709 ? "- 0.533" : "- 0.813") + " * cc.y, yy + " +
+              (bt709 ? "2.112" : "2.018") + " * cc.x) / 255.0;\n";
+      body = luma + chroma + matrix;
+    }
+    if (hdr) {
+      body += std::string("      float hdrPaper = ") + (maxCll > 0 ? "clamp(float(" +
+              std::to_string(maxCll) + ") * 0.1, 80.0, 400.0)" : "100.0") + ";\n";
+      if (hdrTransfer == EffectHdrTransfer::HLG) {
+        body +=
+            "      float a = 0.17883277; float b = 0.28466892; float cc = 0.55991073;\n"
+            "      vec3 hlg = clamp(rgb, 0.0, 1.0);\n"
+            "      vec3 signal = mix(hlg * hlg / 3.0, (exp((hlg - cc) / a) + b) / 12.0,"
+            " step(vec3(0.5), hlg));\n"
+            "      vec3 linear = signal * 1000.0;\n"
+            "      float hlgY = dot(linear, vec3(0.2627, 0.6780, 0.0593)) / 1000.0;\n"
+            "      linear *= pow(max(hlgY, 0.0), 0.2);\n";
+      } else {
+        body +=
+            "      vec3 eotf = pow(clamp(rgb, 0.0, 1.0), vec3(1.0 / 78.84375));\n"
+            "      vec3 linear = 10000.0 * pow(max(eotf - 0.8359375, vec3(0.0)) /"
+            " (18.8515625 - 18.6875 * eotf), vec3(1.0 / 0.1593017578));\n";
+      }
+      body += "      vec3 mapped = linear / (linear + hdrPaper);\n"
+              "      return vec4(pow(clamp(mapped, 0.0, 1.0), vec3(1.0 / 2.2)), 1.0);\n";
+    } else {
+      body += "      return vec4(clamp(rgb, 0.0, 1.0), 1.0);\n";
+    }
+    snapshot->desc.fragmentSource = body;
     snapshot->hash = hashProgram(snapshot->desc, snapshot->parameters, {}, 0);
     mNv12Program = programFor(snapshot, error);
     if (mNv12Program == nullptr) {
@@ -1202,6 +1243,11 @@ bool RenderCore::convertYuvNv12Textures(backend::CommandBuffer* const commands,
     }
     mNv12Bt709 = bt709;
     mNv12FullRange = fullRange;
+    mNv12P010 = p010;
+    mNv12Hdr = hdr;
+    mNv12HdrTransfer = hdrTransfer;
+    mNv12MaxCll = maxCll;
+    mNv12MaxFall = maxFall;
   }
 
   FrameKey key;
