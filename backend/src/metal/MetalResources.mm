@@ -1544,24 +1544,29 @@ Result MetalDevice::importNativeTexture(const NativeTextureDescriptor& descripto
   if (pixelFormat == MTLPixelFormatInvalid) {
     emitMessage(MessageSeverity::Error,
             "the Metal backend cannot import an IOSurface in the requested pixel format (supported: RGBA8, BGRA8, "
-            "RGBA16F)");
+            "RGBA16F, R8, R8G8)");
     return Result::Unsupported;
   }
 
-  // The surface owns the extent; a descriptor that disagrees names the wrong image. Deriving the size when the caller
-  // left it zero is the useful default, and refusing a mismatch is better than importing an image of a different
-  // shape than the frame metadata promises.
-  const uint32_t surfaceWidth = static_cast<uint32_t>(IOSurfaceGetWidth(surface));
-  const uint32_t surfaceHeight = static_cast<uint32_t>(IOSurfaceGetHeight(surface));
+  // A bi-planar surface exposes the luma and chroma planes as separate extents. Plane 0 is the full
+  // image; a later plane has its own (usually half-resolution) width and height, and Metal's
+  // `newTextureWithDescriptor:iosurface:plane:` wants the descriptor to name that plane's extent.
+  const uint32_t plane = descriptor.plane;
+  const uint32_t surfaceWidth = plane == 0
+          ? static_cast<uint32_t>(IOSurfaceGetWidth(surface))
+          : static_cast<uint32_t>(IOSurfaceGetWidthOfPlane(surface, plane));
+  const uint32_t surfaceHeight = plane == 0
+          ? static_cast<uint32_t>(IOSurfaceGetHeight(surface))
+          : static_cast<uint32_t>(IOSurfaceGetHeightOfPlane(surface, plane));
   if (descriptor.width != 0 && descriptor.width != surfaceWidth) {
     emitMessage(MessageSeverity::Error,
-            "the IOSurface is " + std::to_string(surfaceWidth) + " pixels wide but the descriptor says " +
+            "the IOSurface plane is " + std::to_string(surfaceWidth) + " pixels wide but the descriptor says " +
                     std::to_string(descriptor.width));
     return Result::InvalidArgument;
   }
   if (descriptor.height != 0 && descriptor.height != surfaceHeight) {
     emitMessage(MessageSeverity::Error,
-            "the IOSurface is " + std::to_string(surfaceHeight) + " pixels high but the descriptor says " +
+            "the IOSurface plane is " + std::to_string(surfaceHeight) + " pixels high but the descriptor says " +
                     std::to_string(descriptor.height));
     return Result::InvalidArgument;
   }
@@ -1580,7 +1585,7 @@ Result MetalDevice::importNativeTexture(const NativeTextureDescriptor& descripto
 
   id<MTLTexture> texture = [mDevice newTextureWithDescriptor:native
                                                     iosurface:surface
-                                                        plane:descriptor.plane];
+                                                        plane:plane];
   if (texture == nil) {
     emitMessage(MessageSeverity::Error,
             "the Metal device could not wrap the IOSurface (" + std::to_string(surfaceWidth) + "x" +

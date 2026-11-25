@@ -42,6 +42,7 @@ namespace coral {
  * | Metal | `newTextureWithDescriptor:iosurface:plane:` wraps the surface as an `id<MTLTexture>` | yes |
  * | OpenGL ES (iOS) | `CVOpenGLESTextureCache` maps the surface-backed `CVPixelBuffer` to a `GL_TEXTURE_2D` | yes |
  * | OpenGL (macOS) | `CGLTexImageIOSurface2D` binds it as `GL_TEXTURE_RECTANGLE`, then one GPU blit normalises it into a 2D texture | **no** - no CPU copy, but one GPU copy |
+ * | Metal + NV12 | plane 0 and plane 1 are imported as R8 and R8G8 textures, then one conversion pass produces RGBA | no CPU copy; one GPU conversion |
  *
  * macOS's OpenGL cannot bind an IOSurface as a `GL_TEXTURE_2D` (`CGLTexImageIOSurface2D` only accepts
  * `GL_TEXTURE_RECTANGLE_ARB`), and the effect shader dialect samples `sampler2D`. The node therefore
@@ -53,9 +54,10 @@ namespace coral {
  * (`CVOpenGLESTextureCacheCreateTextureFromImage` reports -6683 there), so the iOS OpenGL path is a
  * device path; the Metal path runs on both the simulator and a device.
  *
- * A single-plane RGBA8/BGRA8/RGBA16F surface is supported. A bi-planar NV12/420f video surface is not
- * imported as one texture; configure the decoder to emit BGRA, or use the CPU plane path of
- * `VideoFrameInputNode` until a YUV IOSurface import lands.
+ * Two layouts are supported: a single-plane RGBA8/BGRA8/RGBA16F surface, and an 8-bit bi-planar
+ * NV12 (`420v`/`420f`) surface. NV12 is a Metal feature: the node imports the two planes and runs one
+ * conversion pass to RGBA. The OpenGL/ES backend cannot import the two planes yet, so a caller that
+ * may run on OpenGL should ask the decoder for BGRA (`MediaFormat::processFormat`) instead.
  *
  * ## Lifetime and synchronisation
  *
@@ -78,8 +80,8 @@ public:
    * @param width     pixel width, or 0 to ask the surface. A non-zero value that disagrees with the
    *                  surface is refused rather than silently importing a different image.
    * @param height    pixel height, or 0 to ask the surface.
-   * @param format    the surface's colour layout: RGBA8, BGRA8 or RGBA16F. Video frames are normally
-   *                  BGRA8 (`kCVPixelFormatType_32BGRA`).
+   * @param format    the surface's colour layout: RGBA8, BGRA8, RGBA16F or YUV420 (NV12). Video frames
+   *                  are normally BGRA8 (`kCVPixelFormatType_32BGRA`) or NV12 (`420v`/`420f`).
    * @param queueDepth how many submitted frames may wait for the render thread before the backpressure
    *                  policy applies. 0 chooses 4.
    */
@@ -124,8 +126,9 @@ public:
   /**
    * @return true when the last produced frame sampled the surface's own storage.
    *
-   * False on the macOS OpenGL backend, where the surface is normalised through one GPU blit; see the
-   * class documentation. Meaningless before the first frame.
+   * False on the macOS OpenGL backend, where the surface is normalised through one GPU blit. NV12 on
+   * Metal reports true even though it runs one GPU conversion, because the decoder's surface and its
+   * pixels never pass through the CPU; see the class documentation. Meaningless before the first frame.
    */
   [[nodiscard]] bool isZeroCopy() const noexcept;
 

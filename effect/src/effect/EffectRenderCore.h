@@ -893,6 +893,17 @@ public:
                     std::string& error);
 
   /** Converts YUV420 planes into a pooled RGBA8 frame with a fullscreen shader pass. */
+  /**
+   * Converts an imported NV12 pair (one R8 luma texture and one R8G8 chroma texture) to RGBA.
+   *
+   * <p>This is the texture-plane counterpart of {@link convertYuv420}: the Apple input imports the two
+   * planes of a bi-planar IOSurface, and this pass samples them directly. The 8-bit SDR path is what
+   * the Darwin decoder produces today; an HDR frame is handled by the caller's fallback.
+   */
+  bool convertYuvNv12Textures(backend::CommandBuffer* commands, backend::TextureHandle y,
+                              backend::TextureHandle uv, uint32_t width, uint32_t height, bool bt709,
+                              bool fullRange, FrameLease& out, std::string& error);
+
   bool convertYuv420(backend::CommandBuffer* commands, uint32_t width, uint32_t height, const uint8_t* y,
           uint32_t yRowBytes, const uint8_t* u, uint32_t uRowBytes, const uint8_t* v, uint32_t vRowBytes,
           bool bt709, bool fullRange, bool p010, bool hdr, EffectHdrTransfer hdrTransfer,
@@ -1010,6 +1021,9 @@ private:
   uint32_t mYuvWidth = 0;
   uint32_t mYuvHeight = 0;
   RenderProgram* mYuvProgram = nullptr;
+  RenderProgram* mNv12Program = nullptr;
+  bool mNv12Bt709 = false;
+  bool mNv12FullRange = false;
   bool mYuvBt709 = false;
   bool mYuvFullRange = false;
   bool mYuvP010 = false;

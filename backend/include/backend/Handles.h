@@ -209,9 +209,10 @@ enum class NativeTextureKind : uint32_t {
    * the imported texture retains it, so the caller may release its own reference as soon as the
    * import returned.
    *
-   * The surface must describe a single-plane RGBA8/BGRA8/RGBA16F image. A bi-planar YUV video
-   * surface (NV12/420f) is **not** importable as one texture; the producer has to convert it, or a
-   * future YUV import has to add both plane textures and a conversion sampler.
+   * A single-plane RGBA8/BGRA8/RGBA16F surface is imported as one texture. A bi-planar NV12/420v/
+   * 420f surface is imported plane by plane: plane 0 is an R8 luma texture and plane 1 an R8G8 chroma
+   * texture, which the caller converts with a shader. One import call still names one texture, so a
+   * YUV consumer makes two calls with `plane` set to 0 and 1.
    *
    * Only the Metal backend implements this kind. macOS's OpenGL cannot bind an IOSurface as a
    * `GL_TEXTURE_2D` (`CGLTexImageIOSurface2D` accepts `GL_TEXTURE_RECTANGLE_ARB` only), so
@@ -260,9 +261,9 @@ struct NativeTextureDescriptor {
   /**
    * Plane index inside the platform object: the IOSurface plane for `IOSurface`, 0 elsewhere.
    *
-   * A single-plane RGBA/BGRA surface uses plane 0. A bi-planar video surface would name plane 0
-   * (luma) or plane 1 (chroma), which is why the field exists even though one-texture imports only
-   * use plane 0 today.
+   * A single-plane RGBA/BGRA surface uses plane 0. A bi-planar NV12 surface names plane 0 (R8 luma)
+   * and plane 1 (R8G8 chroma); the Metal IOSurface import uses the plane's own width, height and
+   * row alignment.
    */
   uint32_t plane = 0;
   /**

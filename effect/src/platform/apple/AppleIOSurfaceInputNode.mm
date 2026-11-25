@@ -79,7 +79,7 @@ namespace {
 
 bool isSupportedFormat(const EffectPixelFormat format) noexcept {
   return format == EffectPixelFormat::RGBA8 || format == EffectPixelFormat::BGRA8 ||
-         format == EffectPixelFormat::RGBA16F;
+         format == EffectPixelFormat::RGBA16F || format == EffectPixelFormat::YUV420;
 }
 
 backend::PixelFormat toBackendFormat(const EffectPixelFormat format) noexcept {
@@ -113,12 +113,29 @@ bool isBiPlanarYuvSurface(const IOSurfaceRef surface) noexcept {
   return format == 0x34323076u || format == 0x34323066u || format == 0x34323069u || format == 0x78343230u;
 }
 
+/** Whether the surface is the 8-bit bi-planar NV12 layout this input can convert. */
+bool isNv12Surface(const IOSurfaceRef surface) noexcept {
+  if (surface == nullptr) return false;
+  const uint32_t format = static_cast<uint32_t>(IOSurfaceGetPixelFormat(surface));
+  // '420v' (video range) and '420f' (full range).
+  return format == 0x34323076u || format == 0x34323066u;
+}
+
+/** Whether the surface's NV12 samples are full range ('420f'). */
+bool isFullRangeNv12(const IOSurfaceRef surface) noexcept {
+  return surface != nullptr && static_cast<uint32_t>(IOSurfaceGetPixelFormat(surface)) == 0x34323066u;
+}
+
 /** The node's public entry points all agree on what a valid surface/format/extent is. */
 bool validDescription(const IOSurfaceRef surface, const uint32_t width, const uint32_t height,
                       const EffectPixelFormat format) noexcept {
   if (surface == nullptr || width == 0 || height == 0 || !isSupportedFormat(format)) return false;
-  if (isBiPlanarYuvSurface(surface)) return false;
-  return surfaceDimension(surface, true) == width && surfaceDimension(surface, false) == height;
+  if (surfaceDimension(surface, true) != width || surfaceDimension(surface, false) != height) return false;
+  if (format == EffectPixelFormat::YUV420) {
+    return isNv12Surface(surface);
+  }
+  // A single-plane RGBA/BGRA/RGBA16F import cannot take a bi-planar surface.
+  return !isBiPlanarYuvSurface(surface);
 }
 
 class AppleIOSurfaceRuntime final : public detail::InputRuntime {
@@ -176,8 +193,16 @@ public:
     const RenderTime effectiveTimestamp = queued.hasTimestamp ? queued.timestamp : context.timestamp;
     const backend::Backend deviceBackend = mDevice->getInfo().backend;
     if (deviceBackend == backend::Backend::Metal) {
-      if (!produceMetal(context, queued, effectiveTimestamp, view, metadata, error)) return false;
+      if (queued.format == EffectPixelFormat::YUV420) {
+        if (!produceMetalNv12(context, queued, effectiveTimestamp, view, metadata, error)) return false;
+      } else if (!produceMetal(context, queued, effectiveTimestamp, view, metadata, error)) {
+        return false;
+      }
     } else if (deviceBackend == backend::Backend::OpenGL) {
+      if (queued.format == EffectPixelFormat::YUV420) {
+        error = "the IOSurface NV12 input needs the Metal backend; request BGRA for OpenGL";
+        return false;
+      }
       if (!produceOpenGL(context, queued, effectiveTimestamp, view, metadata, error)) return false;
     } else {
       error = "the IOSurface input supports Metal and OpenGL only";
@@ -205,6 +230,8 @@ public:
     // The produced image is still a valid surface, and the next frame may repeat it; only the producer token
     // belongs to the aborted frame. Device teardown goes through `releaseResources`.
     mFrameLifetime.reset();
+    retireNv12(nullptr);
+    mConverted.reset();
   }
 
   void releaseResources() override {
@@ -214,6 +241,8 @@ public:
       if (mDevice != nullptr && retired.texture.valid()) mDevice->destroyTexture(retired.texture);
     }
     mRetired.clear();
+    retireNv12(nullptr);
+    mConverted.reset();
     mDevice = nullptr;
     mLastSubmission.reset();
   }
@@ -263,6 +292,86 @@ private:
     metadata = detail::FrameAccess::make(detail::allocateFrameId(context), queued.width, queued.height,
             queued.format, EffectColorSpace::SRGB, timestamp);
     return true;
+  }
+
+  bool produceMetalNv12(detail::FrameContext& context,
+                        const AppleIOSurfaceInputNode::State::Queued& queued,
+                        const RenderTime timestamp, detail::FrameView& view, EffectFrame& metadata,
+                        std::string& error) {
+    if (!mDevice->supportsNativeTextureImport(backend::NativeTextureKind::IOSurface)) {
+      error = "this Metal device cannot import an IOSurface";
+      return false;
+    }
+    if (queued.surface == nullptr || !isNv12Surface(queued.surface)) {
+      error = "the submitted IOSurface is not 8-bit bi-planar NV12";
+      return false;
+    }
+
+    const uint32_t chromaWidth = (queued.width + 1) / 2;
+    const uint32_t chromaHeight = (queued.height + 1) / 2;
+
+    backend::TextureHandle luma = backend::TextureHandle::invalid();
+    backend::NativeTextureDescriptor lumaDescriptor;
+    lumaDescriptor.kind = backend::NativeTextureKind::IOSurface;
+    lumaDescriptor.platformHandle = queued.surface;
+    lumaDescriptor.width = queued.width;
+    lumaDescriptor.height = queued.height;
+    lumaDescriptor.format = backend::PixelFormat::R8_UNORM;
+    lumaDescriptor.plane = 0;
+    backend::Result result = mDevice->importNativeTexture(lumaDescriptor, &luma);
+    if (!backend::isSuccess(result) || !luma.valid()) {
+      error = "the NV12 luma plane could not be imported";
+      return false;
+    }
+
+    backend::TextureHandle chroma = backend::TextureHandle::invalid();
+    backend::NativeTextureDescriptor chromaDescriptor;
+    chromaDescriptor.kind = backend::NativeTextureKind::IOSurface;
+    chromaDescriptor.platformHandle = queued.surface;
+    chromaDescriptor.width = chromaWidth;
+    chromaDescriptor.height = chromaHeight;
+    chromaDescriptor.format = backend::PixelFormat::R8G8_UNORM;
+    chromaDescriptor.plane = 1;
+    result = mDevice->importNativeTexture(chromaDescriptor, &chroma);
+    if (!backend::isSuccess(result) || !chroma.valid()) {
+      if (luma.valid()) mDevice->destroyTexture(luma);
+      error = "the NV12 chroma plane could not be imported";
+      return false;
+    }
+
+    // The previous frame's plane textures may still be read by its commands; retire them now that the
+    // new import is ready, exactly as the single-plane path does.
+    retireNv12(mLastSubmission);
+    mNv12Textures[0] = luma;
+    mNv12Textures[1] = chroma;
+
+    if (!context.core->convertYuvNv12Textures(context.commands, luma, chroma, queued.width, queued.height,
+            true, isFullRangeNv12(queued.surface), mConverted, error)) {
+      return false;
+    }
+    mZeroCopy = true;
+
+    view = mConverted.view();
+    view.timestamp = timestamp;
+    view.external = false;
+    metadata = detail::FrameAccess::make(detail::allocateFrameId(context), queued.width, queued.height,
+            EffectPixelFormat::RGBA8, EffectColorSpace::SRGB, timestamp);
+    return true;
+  }
+
+  void retireNv12(const std::shared_ptr<detail::GpuSubmission>& submission) {
+    for (backend::TextureHandle& texture : mNv12Textures) {
+      if (!texture.valid()) continue;
+      if (mDevice == nullptr || submission == nullptr) {
+        if (mDevice != nullptr) mDevice->destroyTexture(texture);
+      } else {
+        Retired retired;
+        retired.texture = texture;
+        retired.submission = submission;
+        mRetired.push_back(std::move(retired));
+      }
+      texture = backend::TextureHandle::invalid();
+    }
   }
 
   bool produceOpenGL(detail::FrameContext& context, const AppleIOSurfaceInputNode::State::Queued& queued,
@@ -367,6 +476,9 @@ private:
   bool mZeroCopy = false;
   std::shared_ptr<detail::GpuSubmission> mLastSubmission;
   std::shared_ptr<void> mFrameLifetime;
+  detail::FrameLease mConverted;
+  backend::TextureHandle mNv12Textures[2] = { backend::TextureHandle::invalid(),
+                                               backend::TextureHandle::invalid() };
   std::vector<Retired> mRetired;
 };
 
@@ -430,7 +542,7 @@ uint32_t AppleIOSurfaceInputNode::height() const noexcept {
 
 EffectResult AppleIOSurfaceInputNode::setSurface(IOSurfaceRef const surface, const uint32_t width,
                                                 const uint32_t height, const EffectPixelFormat format) {
-  if (!isSupportedFormat(format) || isBiPlanarYuvSurface(surface)) return EffectResult::Unsupported;
+  if (!isSupportedFormat(format)) return EffectResult::Unsupported;
   const uint32_t resolvedWidth = width != 0 ? width : surfaceDimension(surface, true);
   const uint32_t resolvedHeight = height != 0 ? height : surfaceDimension(surface, false);
   if (!validDescription(surface, resolvedWidth, resolvedHeight, format)) return EffectResult::InvalidArgument;
@@ -455,7 +567,6 @@ EffectResult AppleIOSurfaceInputNode::submit(IOSurfaceRef const surface, const u
                                              const uint32_t height, const EffectPixelFormat format,
                                              const RenderTime timestamp, std::shared_ptr<void> lifetime) {
   if (!isSupportedFormat(format)) return EffectResult::Unsupported;
-  if (isBiPlanarYuvSurface(surface)) return EffectResult::Unsupported;
   if (!validDescription(surface, width, height, format)) return EffectResult::InvalidArgument;
 
   const std::lock_guard<std::mutex> lock(mState->mutex);

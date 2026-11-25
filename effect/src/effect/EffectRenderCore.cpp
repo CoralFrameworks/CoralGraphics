@@ -650,6 +650,9 @@ void RenderCore::destroySharedResources() noexcept {
     texture = backend::TextureHandle::invalid();
   }
   mYuvProgram = nullptr;
+  mNv12Program = nullptr;
+  mNv12Bt709 = false;
+  mNv12FullRange = false;
   mYuvBt709 = false;
   mYuvFullRange = false;
   mYuvP010 = false;
@@ -1166,6 +1169,92 @@ bool RenderCore::submitShaderCompile(std::function<void()> task) {
 bool RenderCore::topDownTargets() const noexcept {
   return mDevice != nullptr && (mDevice->getInfo().backend == backend::Backend::Vulkan ||
                                 mDevice->getInfo().backend == backend::Backend::Metal);
+}
+
+bool RenderCore::convertYuvNv12Textures(backend::CommandBuffer* const commands,
+        const backend::TextureHandle y, const backend::TextureHandle uv, const uint32_t width,
+        const uint32_t height, const bool bt709, const bool fullRange, FrameLease& out,
+        std::string& error) {
+  if (commands == nullptr || mDevice == nullptr || !y.valid() || !uv.valid()) {
+    error = "the NV12 conversion has no command buffer or plane textures";
+    return false;
+  }
+  if (mNv12Program == nullptr || mNv12Bt709 != bt709 || mNv12FullRange != fullRange) {
+    auto snapshot = std::make_shared<ProgramSnapshot>();
+    snapshot->desc.name = "effect/yuv-nv12-gpu";
+    snapshot->desc.authoring = EffectShaderAuthoring::Body;
+    snapshot->desc.inputCount = 2;
+    const std::string luma = std::string("      float yy = (texture(uInput0, uv).r * 255.0 - ") +
+            (fullRange ? "0.0" : "16.0") + ") * " + (fullRange ? "1.0" : "1.164") + ";\n";
+    const std::string chroma =
+            "      vec2 cc = texture(uInput1, uv).rg * 255.0 - 128.0;\n";
+    const std::string matrix = std::string("      vec3 rgb = vec3(yy + ") +
+            (bt709 ? "1.793" : "1.596") + " * cc.y, yy " +
+            (bt709 ? "- 0.213" : "- 0.391") + " * cc.x " +
+            (bt709 ? "- 0.533" : "- 0.813") + " * cc.y, yy + " +
+            (bt709 ? "2.112" : "2.018") + " * cc.x) / 255.0;\n";
+    snapshot->desc.fragmentSource = luma + chroma + matrix +
+            "      return vec4(clamp(rgb, 0.0, 1.0), 1.0);\n";
+    snapshot->hash = hashProgram(snapshot->desc, snapshot->parameters, {}, 0);
+    mNv12Program = programFor(snapshot, error);
+    if (mNv12Program == nullptr) {
+      return false;
+    }
+    mNv12Bt709 = bt709;
+    mNv12FullRange = fullRange;
+  }
+
+  FrameKey key;
+  key.width = width;
+  key.height = height;
+  key.format = backend::PixelFormat::R8G8B8A8_UNORM;
+  FrameLease lease = mPool->acquire(key, error);
+  if (!lease.isValid()) {
+    return false;
+  }
+  const backend::RenderPipelineHandle pipeline = mNv12Program->pipelineFor(key.format, lease.get()->pass, nullptr);
+  if (!pipeline.valid()) {
+    error = "the NV12 conversion pipeline could not be built";
+    return false;
+  }
+  const backend::DescriptorSetHandle set = mNv12Program->setFor(
+          { y, uv }, mParamsTexture, mLinearSampler, {}, nullptr, nullptr);
+  if (!set.valid()) {
+    error = "the NV12 conversion set could not be bound";
+    return false;
+  }
+  ParameterBlock block;
+  block.reset();
+  block.values[0] = static_cast<float>(width);
+  block.values[1] = static_cast<float>(height);
+  block.values[2] = width != 0 ? 1.0f / static_cast<float>(width) : 0.0f;
+  block.values[3] = height != 0 ? 1.0f / static_cast<float>(height) : 0.0f;
+  block.values[4] = static_cast<float>(width);
+  block.values[5] = static_cast<float>(height);
+  block.values[6] = block.values[2];
+  block.values[7] = block.values[3];
+  if (!writeParameters(block, error)) {
+    return false;
+  }
+  backend::RenderPassBeginInfo info;
+  info.renderPass = lease.get()->pass;
+  info.colorAttachmentCount = 1;
+  info.colorAttachments[0].view = lease.get()->view;
+  info.colorAttachments[0].loadOp = backend::LoadOp::Clear;
+  info.colorAttachments[0].storeOp = backend::StoreOp::Store;
+  info.colorAttachments[0].clearColor = backend::Color::transparentBlack();
+  info.renderArea = { width, height };
+  if (!backend::isSuccess(commands->beginRenderPass(info)) ||
+      !backend::isSuccess(commands->bindRenderPipeline(pipeline)) ||
+      !backend::isSuccess(commands->bindDescriptorSet(0, set)) ||
+      !backend::isSuccess(commands->setVertexBuffer(0, mQuad, 0)) ||
+      !backend::isSuccess(commands->draw(6, 1, 0, 0)) ||
+      !backend::isSuccess(commands->endRenderPass())) {
+    error = "the NV12 conversion pass could not be recorded";
+    return false;
+  }
+  out = std::move(lease);
+  return true;
 }
 
 bool RenderCore::convertYuv420(backend::CommandBuffer* const commands, const uint32_t width,
