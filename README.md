@@ -124,11 +124,21 @@ OpenGL backend is OpenGL ES 3.0 through EAGL, not EGL, so that platform layer is
 offscreen device needs no window and the tests run in the simulator.
 
 **If `xcode-select -p` still reports the Command Line Tools**, `xcrun --sdk iphonesimulator` and
-`xcrun metal` fail even though Xcode is installed. Either select Xcode once
-(`sudo xcode-select -s /Applications/Xcode.app`) or prefix the commands below with
-`DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer`. The Metal backend compiles MSL at run time
-with `newLibraryWithSource:`, so the Metal toolchain's offline compiler is not a build prerequisite; the
-SDK headers are.
+`cmake -DCMAKE_OSX_SYSROOT=iphonesimulator` fail even though Xcode is installed: the SDK is inside
+`/Applications/Xcode.app`, but the active developer directory is the standalone Command Line Tools.
+Either select Xcode once (`sudo xcode-select -s /Applications/Xcode.app/Contents/Developer`) or point
+this shell at it. Every command that needs the iOS SDK - `xcrun`, `xcodebuild` and CMake's compiler
+probes - has to see the same `DEVELOPER_DIR`:
+
+```sh
+export DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer
+
+# This must print a path under Xcode.app, not an error:
+xcrun --sdk iphonesimulator --show-sdk-path
+```
+
+The Metal backend compiles MSL at run time with `newLibraryWithSource:`, so the Metal toolchain's
+offline compiler is not a build prerequisite; the SDK headers are.
 
 ```sh
 # The build-time shader compiler is a host tool. Build it in the host tree first so the iOS build
@@ -155,6 +165,11 @@ xcrun simctl spawn booted build-ios/test_graphics.app/test_graphics
 xcrun simctl spawn booted build-ios/effect/test_effect.app/test_effect
 xcrun simctl spawn booted build-ios/geometry/test_geometry.app/test_geometry
 ```
+
+The Apple IOSurface nodes follow the same split: the Metal path wraps the surface as an `id<MTLTexture>`
+and runs in the simulator, while the OpenGL path maps it through `CVOpenGLESTextureCache`. Core Video
+reports `kCVReturnPixelBufferNotOpenGLCompatible` (-6683) for that map in the simulator, so the OpenGL
+rows skip there; use a device for the iOS OpenGL zero-copy path.
 
 `test_backend` prints the negotiated device (`OpenGL ES 3.0`, `EAGL`) and the GPU tests render through
 the backend's framebuffer objects. A physical-device configure uses `-DCMAKE_OSX_SYSROOT=iphoneos` and

@@ -22,7 +22,7 @@
 
 #include <backend/Validation.h>
 
-#include <IOSurface/IOSurface.h>
+#include <IOSurface/IOSurfaceRef.h>
 
 #include <algorithm>
 #include <cstring>

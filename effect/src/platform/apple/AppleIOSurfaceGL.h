@@ -19,7 +19,7 @@
 
 #include <effect/EffectTypes.h>
 
-#include <IOSurface/IOSurface.h>
+#include <IOSurface/IOSurfaceRef.h>
 
 #include <TargetConditionals.h>
 

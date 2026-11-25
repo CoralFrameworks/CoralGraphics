@@ -154,13 +154,16 @@ std::shared_ptr<AppleGLIOSurfaceBridge> AppleGLIOSurfaceBridge::create(IOSurface
     return nullptr;
   }
 
-  // The compatibility key is what makes Core Video keep the surface mapped for OpenGL ES instead of
-  // copying it under the cache. A surface that cannot take it is still tried without, which some
-  // producer-created CVPixelBuffers require. A CF dictionary rather than an Objective-C one keeps this
-  // file free of Foundation and of autorelease lifetime questions.
+  // The compatibility keys below make Core Video keep the surface mapped for OpenGL ES instead of copying it under the
+  // cache. A surface that rejects them is still tried without, which some producer-created CVPixelBuffers require. A CF
+  // dictionary rather than an Objective-C one keeps this file free of Foundation and of autorelease lifetime questions.
   CFMutableDictionaryRef attributes = CFDictionaryCreateMutable(
           kCFAllocatorDefault, 1, &kCFTypeDictionaryKeyCallBacks, &kCFTypeDictionaryValueCallBacks);
   if (attributes != nullptr) {
+    // The texture cache, not immediate-mode GLES sampling, is what this bridge uses, and Core Video keeps the two
+    // compatibility promises separate. Both are requested so a caller that later samples the same pixel buffer
+    // directly is not surprised either.
+    CFDictionaryAddValue(attributes, kCVPixelBufferOpenGLESTextureCacheCompatibilityKey, kCFBooleanTrue);
     CFDictionaryAddValue(attributes, kCVPixelBufferOpenGLESCompatibilityKey, kCFBooleanTrue);
   }
   CVReturn result = CVPixelBufferCreateWithIOSurface(kCFAllocatorDefault, surface, attributes,

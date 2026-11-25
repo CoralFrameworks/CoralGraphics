@@ -29,7 +29,8 @@
 #include <effect/platform/apple/AppleIOSurfaceInputNode.h>
 #include <effect/platform/apple/AppleIOSurfaceOutputNode.h>
 
-#include <IOSurface/IOSurface.h>
+#include <IOSurface/IOSurfaceRef.h>
+#include <TargetConditionals.h>
 
 #include <gtest/gtest.h>
 
@@ -112,7 +113,7 @@ public:
 
   /** Fills every pixel with one straight (non-premultiplied) colour in BGRA byte order. */
   void fill(const uint8_t blue, const uint8_t green, const uint8_t red, const uint8_t alpha) {
-    if (IOSurfaceLock(mSurface, 0, nullptr) != kIOReturnSuccess) return;
+    if (IOSurfaceLock(mSurface, 0, nullptr) != KERN_SUCCESS) return;
     auto* const base = static_cast<uint8_t*>(IOSurfaceGetBaseAddress(mSurface));
     const size_t stride = IOSurfaceGetBytesPerRow(mSurface);
     for (uint32_t row = 0; row < mHeight; ++row) {
@@ -131,7 +132,7 @@ public:
   /** @return the BGRA bytes of the centre pixel. */
   [[nodiscard]] std::vector<uint8_t> centrePixel() const {
     std::vector<uint8_t> pixel(4, 0);
-    if (IOSurfaceLock(mSurface, kIOSurfaceLockReadOnly, nullptr) != kIOReturnSuccess) return pixel;
+    if (IOSurfaceLock(mSurface, kIOSurfaceLockReadOnly, nullptr) != KERN_SUCCESS) return pixel;
     const auto* const base = static_cast<const uint8_t*>(IOSurfaceGetBaseAddress(mSurface));
     const size_t stride = IOSurfaceGetBytesPerRow(mSurface);
     const uint8_t* const source = base + static_cast<size_t>(mHeight / 2) * stride + static_cast<size_t>(mWidth / 2) * 4;
@@ -188,7 +189,19 @@ void startOrSkip(const std::shared_ptr<EffectEngine>& engine) {
   }
 }
 
-class AppleIOSurfaceBackendTest : public ::testing::TestWithParam<EffectBackend> {};
+class AppleIOSurfaceBackendTest : public ::testing::TestWithParam<EffectBackend> {
+protected:
+  void SetUp() override {
+#if TARGET_OS_SIMULATOR
+    // Core Video's texture cache does not map an IOSurface to a GLES texture in the iOS simulator; it reports
+    // kCVReturnPixelBufferNotOpenGLCompatible from CVOpenGLESTextureCacheCreateTextureFromImage. The same bridge runs
+    // on a device, and the Metal rows above still exercise the surface on the simulator.
+    if (GetParam() == EffectBackend::OpenGL) {
+      GTEST_SKIP() << "CVOpenGLESTextureCache does not map IOSurfaces in the iOS simulator; run this on a device";
+    }
+#endif
+  }
+};
 
 TEST_P(AppleIOSurfaceBackendTest, InputSamplesAProducerSurface) {
   const auto source = TestSurface::create(kSize, kSize);

@@ -20,7 +20,7 @@
 #include <effect/EffectInputNode.h>
 #include <effect/EffectTypes.h>
 
-#include <IOSurface/IOSurface.h>
+#include <IOSurface/IOSurfaceRef.h>
 
 #include <cstdint>
 #include <memory>
@@ -48,6 +48,10 @@ namespace coral {
  * refreshes a 2D image with `glBlitFramebuffer` once per frame on that backend. The pixels never visit
  * the CPU, but `isZeroCopy()` reports false there so a caller that needs strict zero-copy can choose
  * Metal.
+ *
+ * Core Video does not map an IOSurface to a GLES texture in the iOS simulator
+ * (`CVOpenGLESTextureCacheCreateTextureFromImage` reports -6683 there), so the iOS OpenGL path is a
+ * device path; the Metal path runs on both the simulator and a device.
  *
  * A single-plane RGBA8/BGRA8/RGBA16F surface is supported. A bi-planar NV12/420f video surface is not
  * imported as one texture; configure the decoder to emit BGRA, or use the CPU plane path of

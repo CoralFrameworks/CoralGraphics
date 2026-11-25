@@ -20,7 +20,7 @@
 #include <effect/EffectOutputNode.h>
 #include <effect/EffectTypes.h>
 
-#include <IOSurface/IOSurface.h>
+#include <IOSurface/IOSurfaceRef.h>
 
 #include <cstdint>
 #include <memory>
@@ -45,6 +45,10 @@ namespace coral {
  * As with the input node, macOS OpenGL cannot address an IOSurface as `GL_TEXTURE_2D`; the node records
  * the frame into a normal 2D texture and normalises it into the surface after the submission, on the
  * render thread. `isZeroCopy()` reports false there.
+ *
+ * Core Video does not map an IOSurface to a GLES texture in the iOS simulator
+ * (`CVOpenGLESTextureCacheCreateTextureFromImage` reports -6683 there), so the iOS OpenGL path is a
+ * device path; the Metal path runs on both the simulator and a device.
  *
  * A single-plane RGBA8/BGRA8/RGBA16F surface is supported, and the surface's layout must match the
  * format the node was created with. The graph's own frame format is converted by the engine's output
