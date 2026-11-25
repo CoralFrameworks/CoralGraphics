@@ -118,6 +118,7 @@ public:
     RenderTime timestamp;
     bool hasTimestamp = false;
     std::shared_ptr<void> lifetime;
+    bool fromQueue = false;
     {
       const std::lock_guard<std::mutex> lock(mState->mutex);
       if (!mState->queue.empty()) {
@@ -131,6 +132,7 @@ public:
         timestamp = queued.timestamp;
         hasTimestamp = true;
         lifetime = std::move(queued.lifetime);
+        fromQueue = true;
       } else {
         source = mState->texture;
         width = mState->width;
@@ -149,7 +151,37 @@ public:
     mOwner = context.core;
 
     if (!ensureResources(context, source.Get(), width, height, format, version, error)) return false;
-    mFrameLifetime = std::move(lifetime);
+    if (fromQueue) {
+      // The producer's token for the previous "current" image is retired now, with the submission that
+      // last sampled it; a continuous engine keeps handing that image back through `repeatLastFrame`, so
+      // it must stay alive until a new frame replaces it. The new token keeps this frame's texture (and
+      // the decoder slot behind it) alive for as long as the graph may repeat it.
+      //
+      // Only a produced frame touches the token. A repeat (the queue was empty) keeps both the token and
+      // the repeat texture it protects; retiring them when no new frame arrived would free the slot
+      // while the engine keeps sampling the image that lives in it.
+      if (mFrameLifetime != nullptr) {
+        mRetired.push_back(Retired{ mLastSubmission, std::move(mFrameLifetime) });
+        mFrameLifetime.reset();
+      }
+      mFrameLifetime = std::move(lifetime);
+      // A repeat samples these fields, so they name the image the current token protects - the last
+      // produced frame, not the last one that was submitted.
+      const std::lock_guard<std::mutex> lock(mState->mutex);
+      if (mState->texture != source.Get()) {
+        source->AddRef();
+        if (mState->texture != nullptr) {
+          mState->texture->Release();
+        }
+        mState->texture = source.Get();
+      }
+      mState->width = width;
+      mState->height = height;
+      mState->format = format;
+      mState->version = version;
+      mState->timestamp = timestamp;
+      mState->hasTimestamp = hasTimestamp;
+    }
     mState->zeroCopy.store(mImported.valid(), std::memory_order_relaxed);
 
     if (mImported.valid()) {
@@ -193,14 +225,27 @@ public:
   }
 
   void afterSubmit(const std::shared_ptr<detail::GpuSubmission>& submission) override {
-    (void) submission;
     // The imported texture is cached by its D3D11 source and outlives this frame: importing the same
     // shared memory again while an earlier image is alive makes some drivers lose the device.
-    mFrameLifetime.reset();
+    //
+    // The current frame's producer token is not dropped here; `produce` retires it when a new frame
+    // replaces the image, because the graph repeats the current image until then. The retired list
+    // holds each token until the submission that sampled its texture has completed, which is the
+    // "until the graph is done with the texture" contract the lifetime parameter promises.
+    mLastSubmission = submission;
+    for (auto it = mRetired.begin(); it != mRetired.end();) {
+      if (it->submission == nullptr || it->submission->isDone()) {
+        it = mRetired.erase(it);
+      } else {
+        ++it;
+      }
+    }
   }
 
   void afterAbort() override {
     mFrameLifetime.reset();
+    mRetired.clear();
+    mLastSubmission.reset();
     if (mDevice != nullptr) {
       for (auto& entry: mImports) {
         if (entry.second.texture.valid()) mDevice->destroyTexture(entry.second.texture);
@@ -212,6 +257,8 @@ public:
 
   void releaseResources() override {
     mFrameLifetime.reset();
+    mRetired.clear();
+    mLastSubmission.reset();
     if (mDevice != nullptr) {
       for (auto& entry: mImports) {
         if (entry.second.texture.valid()) mDevice->destroyTexture(entry.second.texture);
@@ -409,6 +456,14 @@ private:
   EffectPixelFormat mFallbackFormat = EffectPixelFormat::RGBA8;
   std::unordered_map<ID3D11Texture2D*, CachedImport> mImports;
   std::shared_ptr<void> mFrameLifetime;
+  /** Producer tokens held until the submission that sampled their texture completes. */
+  struct Retired {
+    std::shared_ptr<detail::GpuSubmission> submission;
+    std::shared_ptr<void> lifetime;
+  };
+  std::vector<Retired> mRetired;
+  /** The submission that last sampled the current image, for the retirement of its token. */
+  std::shared_ptr<detail::GpuSubmission> mLastSubmission;
   std::vector<uint8_t> mPixels;
   uint32_t mVersion = 0;
   uint32_t mWidth = 0;
@@ -486,11 +541,12 @@ EffectResult WindowsD3D11InputNode::submit(ID3D11Texture2D* const texture, const
   queued.timestamp = timestamp;
   queued.version = ++mState->version;
   queued.lifetime = std::move(lifetime);
-  mState->width = width;
-  mState->height = height;
-  mState->format = format;
-  mState->timestamp = timestamp;
-  mState->hasTimestamp = timestamp.isValid();
+  // `produce` repeats the last produced frame when its queue is empty, which is most frames on a
+  // continuous engine whose decoder runs slower than the display. It must not repeat a frame that is
+  // only *queued*: the sink behind that frame is free to reuse its texture as soon as the frame is
+  // produced, and a repeat would then sample the next picture under the old timestamp. The repeat
+  // target (`mState->texture`, timestamp and size) is therefore updated by `produce`, together with
+  // the token that keeps that texture alive.
   mState->queue.push_back(std::move(queued));
   return EffectResult::Success;
 }
