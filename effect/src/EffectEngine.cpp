@@ -833,6 +833,11 @@ void EngineImpl::setOnAfterFrame(std::function<void(backend::Device&)> callback)
   mOnAfterFrame = std::move(callback);
 }
 
+void EngineImpl::setOnFrameSubmitted(
+    std::function<void(backend::Device&, std::shared_ptr<Fence>)> callback) {
+  mOnFrameSubmitted = std::move(callback);
+}
+
 void EngineImpl::publishStats(const uint32_t droppedDelta) {
   const std::lock_guard<std::mutex> lock(mStatsMutex);
   mStats.frameCount = mFrameIndex;
@@ -1346,10 +1351,19 @@ void EngineImpl::renderLoop() {
     const auto start = std::chrono::steady_clock::now();
     std::string error;
     std::shared_ptr<FrameCompletion> completion;
-    if (!mPendingRequests.empty() && mPendingRequests.front().fenceDone != nullptr) {
+    if (mOnFrameSubmitted != nullptr ||
+        (!mPendingRequests.empty() && mPendingRequests.front().fenceDone != nullptr)) {
       completion = std::make_shared<FrameCompletion>();
     }
     EffectResult result = renderFrame(error, &completion);
+    if (mOnFrameSubmitted != nullptr && completion != nullptr && mCore != nullptr &&
+        mCore->device() != nullptr) {
+      if (result != EffectResult::Success) {
+        // A failed frame has no submission to poll; give the waiter a definite answer.
+        completion->signal(false);
+      }
+      mOnFrameSubmitted(*mCore->device(), detail::makeFence(completion));
+    }
     // A failed frame's reason only exists on this thread, and `execute()` has no way to hand it back. Reporting it
     // as a diagnostic is what makes "the input node 'video-b' has no frame" reachable at all; the duplicate check
     // keeps a steady-state failure from replacing the diagnostics buffer with 60 copies of itself per second.
@@ -1634,6 +1648,11 @@ void EffectEngine::setOnBeforeFrame(std::function<void(backend::Device&)> callba
 
 void EffectEngine::setOnAfterFrame(std::function<void(backend::Device&)> callback) {
   mImpl->setOnAfterFrame(std::move(callback));
+}
+
+void EffectEngine::setOnFrameSubmitted(
+    std::function<void(backend::Device&, std::shared_ptr<Fence>)> callback) {
+  mImpl->setOnFrameSubmitted(std::move(callback));
 }
 
 EffectResult EffectEngine::flush() {

@@ -573,6 +573,8 @@ public:
   void setOnDeviceReady(std::function<void(backend::Device&)> callback);
   void setOnBeforeFrame(std::function<void(backend::Device&)> callback);
   void setOnAfterFrame(std::function<void(backend::Device&)> callback);
+  void setOnFrameSubmitted(
+    std::function<void(backend::Device&, std::shared_ptr<Fence>)> callback);
   EffectResult setRenderSize(uint32_t width, uint32_t height);
   EffectResult setFrameRate(float framesPerSecond);
 
@@ -765,6 +767,7 @@ private:
   std::shared_ptr<EffectExternalTextureResolver> mExternalTextureResolver;
   std::function<void(backend::Device&)> mOnBeforeFrame;
   std::function<void(backend::Device&)> mOnAfterFrame;
+  std::function<void(backend::Device&, std::shared_ptr<Fence>)> mOnFrameSubmitted;
   std::function<void(backend::Device&)> mOnDeviceReady;
   std::shared_ptr<CallbackQueue> mCallbackQueue;
   std::unique_ptr<GraphExecutor> mExecutor;

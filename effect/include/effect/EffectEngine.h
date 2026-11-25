@@ -278,6 +278,16 @@ public:
    */
   void setOnAfterFrame(std::function<void(backend::Device&)> callback);
 
+  /**
+   * Sets a callback that runs on the render thread after every frame, with a fence for its GPU
+   * completion.
+   *
+   * <p>The fence may already be signalled by the time the callback runs; waiting on it is still
+   * valid and returns `kConditionSatisfied`. It must not be waited on from the render thread.
+   */
+  void setOnFrameSubmitted(
+      std::function<void(backend::Device&, std::shared_ptr<Fence>)> callback);
+
   ~EffectEngine();
 
   EffectEngine(const EffectEngine&) = delete;
