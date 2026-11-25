@@ -48,6 +48,7 @@ struct AppleIOSurfaceInputNode::State {
     bool hasTimestamp = false;
     bool bt709 = true;
     bool fullRange = false;
+    uint64_t version = 0;
     std::shared_ptr<void> lifetime;
   };
 
@@ -71,6 +72,7 @@ struct AppleIOSurfaceInputNode::State {
   bool repeat = true;
   bool bt709 = true;
   bool fullRange = false;
+  uint64_t version = 0;
   RenderTime timestamp;
   bool hasTimestamp = false;
   std::deque<Queued> queue;
@@ -170,6 +172,7 @@ public:
         queued.format = mState->format;
         queued.bt709 = mState->bt709;
         queued.fullRange = mState->fullRange;
+        queued.version = mState->version;
         queued.timestamp = mState->timestamp;
         queued.hasTimestamp = mState->hasTimestamp;
         if (queued.surface != nullptr) CFRetain(queued.surface);
@@ -238,6 +241,8 @@ public:
     mFrameLifetime.reset();
     retireNv12(nullptr);
     mConverted.reset();
+    mConvertedVersion = 0;
+    mConvertedSurface = nullptr;
   }
 
   void releaseResources() override {
@@ -249,6 +254,8 @@ public:
     mRetired.clear();
     retireNv12(nullptr);
     mConverted.reset();
+    mConvertedVersion = 0;
+    mConvertedSurface = nullptr;
     mDevice = nullptr;
     mLastSubmission.reset();
   }
@@ -258,6 +265,12 @@ private:
     backend::TextureHandle texture = backend::TextureHandle::invalid();
     std::shared_ptr<detail::AppleGLIOSurfaceBridge> bridge;
     std::shared_ptr<detail::GpuSubmission> submission;
+    /**
+     * Producer token held until the submission that sampled the surface completed. For the NV12 path
+     * this is a CoreVideo retain of the decoder's pixel buffer, not the decoder's own wrapper, so it
+     * stays safe even if the decoder has already been destroyed.
+     */
+    std::shared_ptr<void> lifetime;
   };
 
   bool produceMetal(detail::FrameContext& context, const AppleIOSurfaceInputNode::State::Queued& queued,
@@ -313,6 +326,19 @@ private:
       return false;
     }
 
+    // The engine renders faster than the producer. Once the surface behind the current version has been
+    // converted, later ticks repeat that image; running the conversion again would add a needless
+    // full-screen pass per refresh and make the preview look irregular.
+    if (mConverted.isValid() && mConvertedVersion == queued.version &&
+        mConvertedSurface == queued.surface) {
+      view = mConverted.view();
+      view.timestamp = timestamp;
+      view.external = false;
+      metadata = detail::FrameAccess::make(detail::allocateFrameId(context), queued.width, queued.height,
+              EffectPixelFormat::RGBA8, EffectColorSpace::SRGB, timestamp);
+      return true;
+    }
+
     const uint32_t chromaWidth = (queued.width + 1) / 2;
     const uint32_t chromaHeight = (queued.height + 1) / 2;
 
@@ -345,16 +371,19 @@ private:
       return false;
     }
 
-    // The previous frame's plane textures may still be read by its commands; retire them now that the
-    // new import is ready, exactly as the single-plane path does.
+    // The previous frame's plane textures and the decoder buffer behind them may still be read by its
+    // commands; retire them now that the new import is ready, exactly as the single-plane path does.
     retireNv12(mLastSubmission);
     mNv12Textures[0] = luma;
     mNv12Textures[1] = chroma;
+    mNv12Lifetime = queued.lifetime;
 
     if (!context.core->convertYuvNv12Textures(context.commands, luma, chroma, queued.width, queued.height,
             queued.bt709, queued.fullRange, mConverted, error)) {
       return false;
     }
+    mConvertedVersion = queued.version;
+    mConvertedSurface = queued.surface;
     mZeroCopy = true;
 
     view = mConverted.view();
@@ -366,6 +395,7 @@ private:
   }
 
   void retireNv12(const std::shared_ptr<detail::GpuSubmission>& submission) {
+    bool lifetimeAttached = false;
     for (backend::TextureHandle& texture : mNv12Textures) {
       if (!texture.valid()) continue;
       if (mDevice == nullptr || submission == nullptr) {
@@ -374,10 +404,17 @@ private:
         Retired retired;
         retired.texture = texture;
         retired.submission = submission;
+        if (!lifetimeAttached) {
+          retired.lifetime = std::move(mNv12Lifetime);
+          lifetimeAttached = true;
+        }
         mRetired.push_back(std::move(retired));
       }
       texture = backend::TextureHandle::invalid();
     }
+    mNv12Lifetime.reset();
+    mConvertedVersion = 0;
+    mConvertedSurface = nullptr;
   }
 
   bool produceOpenGL(detail::FrameContext& context, const AppleIOSurfaceInputNode::State::Queued& queued,
@@ -483,6 +520,9 @@ private:
   std::shared_ptr<detail::GpuSubmission> mLastSubmission;
   std::shared_ptr<void> mFrameLifetime;
   detail::FrameLease mConverted;
+  uint64_t mConvertedVersion = 0;
+  IOSurfaceRef mConvertedSurface = nullptr;
+  std::shared_ptr<void> mNv12Lifetime;
   backend::TextureHandle mNv12Textures[2] = { backend::TextureHandle::invalid(),
                                                backend::TextureHandle::invalid() };
   std::vector<Retired> mRetired;
@@ -568,6 +608,7 @@ EffectResult AppleIOSurfaceInputNode::submitSurface(
   queued.format = format;
   queued.bt709 = bt709;
   queued.fullRange = fullRange;
+  queued.version = ++mState->version;
   queued.timestamp = timestamp;
   queued.hasTimestamp = timestamp.isValid();
   queued.lifetime = std::move(lifetime);
@@ -612,6 +653,7 @@ EffectResult AppleIOSurfaceInputNode::setSurface(IOSurfaceRef const surface, con
   mState->format = format;
   mState->bt709 = bt709;
   mState->fullRange = fullRange;
+  ++mState->version;
   mState->timestamp = {};
   mState->hasTimestamp = false;
   return EffectResult::Success;
