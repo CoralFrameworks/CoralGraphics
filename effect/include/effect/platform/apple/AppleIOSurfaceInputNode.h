@@ -139,6 +139,10 @@ private:
   AppleIOSurfaceInputNode(IOSurfaceRef surface, uint32_t width, uint32_t height, EffectPixelFormat format,
                           uint32_t queueDepth);
 
+  EffectResult submitSurface(IOSurfaceRef surface, uint32_t width, uint32_t height,
+                             EffectPixelFormat format, RenderTime timestamp,
+                             std::shared_ptr<void> lifetime, bool bt709, bool fullRange);
+
   std::shared_ptr<State> mState;
 };
 

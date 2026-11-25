@@ -46,6 +46,8 @@ struct AppleIOSurfaceInputNode::State {
     EffectPixelFormat format = EffectPixelFormat::BGRA8;
     RenderTime timestamp;
     bool hasTimestamp = false;
+    bool bt709 = true;
+    bool fullRange = false;
     std::shared_ptr<void> lifetime;
   };
 
@@ -67,6 +69,8 @@ struct AppleIOSurfaceInputNode::State {
   uint32_t height = 0;
   EffectPixelFormat format = EffectPixelFormat::BGRA8;
   bool repeat = true;
+  bool bt709 = true;
+  bool fullRange = false;
   RenderTime timestamp;
   bool hasTimestamp = false;
   std::deque<Queued> queue;
@@ -164,6 +168,8 @@ public:
         queued.width = mState->width;
         queued.height = mState->height;
         queued.format = mState->format;
+        queued.bt709 = mState->bt709;
+        queued.fullRange = mState->fullRange;
         queued.timestamp = mState->timestamp;
         queued.hasTimestamp = mState->hasTimestamp;
         if (queued.surface != nullptr) CFRetain(queued.surface);
@@ -346,7 +352,7 @@ private:
     mNv12Textures[1] = chroma;
 
     if (!context.core->convertYuvNv12Textures(context.commands, luma, chroma, queued.width, queued.height,
-            true, isFullRangeNv12(queued.surface), mConverted, error)) {
+            queued.bt709, queued.fullRange, mConverted, error)) {
       return false;
     }
     mZeroCopy = true;
@@ -540,32 +546,10 @@ uint32_t AppleIOSurfaceInputNode::height() const noexcept {
   return mState->height;
 }
 
-EffectResult AppleIOSurfaceInputNode::setSurface(IOSurfaceRef const surface, const uint32_t width,
-                                                const uint32_t height, const EffectPixelFormat format) {
-  if (!isSupportedFormat(format)) return EffectResult::Unsupported;
-  const uint32_t resolvedWidth = width != 0 ? width : surfaceDimension(surface, true);
-  const uint32_t resolvedHeight = height != 0 ? height : surfaceDimension(surface, false);
-  if (!validDescription(surface, resolvedWidth, resolvedHeight, format)) return EffectResult::InvalidArgument;
-
-  const std::lock_guard<std::mutex> lock(mState->mutex);
-  CFRetain(surface);
-  for (const State::Queued& entry : mState->queue) {
-    if (entry.surface != nullptr) CFRelease(entry.surface);
-  }
-  mState->queue.clear();
-  if (mState->surface != nullptr) CFRelease(mState->surface);
-  mState->surface = surface;
-  mState->width = resolvedWidth;
-  mState->height = resolvedHeight;
-  mState->format = format;
-  mState->timestamp = {};
-  mState->hasTimestamp = false;
-  return EffectResult::Success;
-}
-
-EffectResult AppleIOSurfaceInputNode::submit(IOSurfaceRef const surface, const uint32_t width,
-                                             const uint32_t height, const EffectPixelFormat format,
-                                             const RenderTime timestamp, std::shared_ptr<void> lifetime) {
+EffectResult AppleIOSurfaceInputNode::submitSurface(
+    IOSurfaceRef const surface, const uint32_t width, const uint32_t height,
+    const EffectPixelFormat format, const RenderTime timestamp, std::shared_ptr<void> lifetime,
+    const bool bt709, const bool fullRange) {
   if (!isSupportedFormat(format)) return EffectResult::Unsupported;
   if (!validDescription(surface, width, height, format)) return EffectResult::InvalidArgument;
 
@@ -582,6 +566,8 @@ EffectResult AppleIOSurfaceInputNode::submit(IOSurfaceRef const surface, const u
   queued.width = width;
   queued.height = height;
   queued.format = format;
+  queued.bt709 = bt709;
+  queued.fullRange = fullRange;
   queued.timestamp = timestamp;
   queued.hasTimestamp = timestamp.isValid();
   queued.lifetime = std::move(lifetime);
@@ -596,9 +582,48 @@ EffectResult AppleIOSurfaceInputNode::submit(IOSurfaceRef const surface, const u
   mState->width = width;
   mState->height = height;
   mState->format = format;
+  mState->bt709 = bt709;
+  mState->fullRange = fullRange;
   mState->timestamp = timestamp;
   mState->hasTimestamp = timestamp.isValid();
   return EffectResult::Success;
+}
+
+EffectResult AppleIOSurfaceInputNode::setSurface(IOSurfaceRef const surface, const uint32_t width,
+                                                const uint32_t height, const EffectPixelFormat format) {
+  if (!isSupportedFormat(format)) return EffectResult::Unsupported;
+  const uint32_t resolvedWidth = width != 0 ? width : surfaceDimension(surface, true);
+  const uint32_t resolvedHeight = height != 0 ? height : surfaceDimension(surface, false);
+  if (!validDescription(surface, resolvedWidth, resolvedHeight, format)) return EffectResult::InvalidArgument;
+  // A surface alone carries no colour metadata; the bi-planar convention is BT.709, full range for 420f.
+  const bool bt709 = true;
+  const bool fullRange = format == EffectPixelFormat::YUV420 && isFullRangeNv12(surface);
+
+  const std::lock_guard<std::mutex> lock(mState->mutex);
+  CFRetain(surface);
+  for (const State::Queued& entry : mState->queue) {
+    if (entry.surface != nullptr) CFRelease(entry.surface);
+  }
+  mState->queue.clear();
+  if (mState->surface != nullptr) CFRelease(mState->surface);
+  mState->surface = surface;
+  mState->width = resolvedWidth;
+  mState->height = resolvedHeight;
+  mState->format = format;
+  mState->bt709 = bt709;
+  mState->fullRange = fullRange;
+  mState->timestamp = {};
+  mState->hasTimestamp = false;
+  return EffectResult::Success;
+}
+
+EffectResult AppleIOSurfaceInputNode::submit(IOSurfaceRef const surface, const uint32_t width,
+                                             const uint32_t height, const EffectPixelFormat format,
+                                             const RenderTime timestamp, std::shared_ptr<void> lifetime) {
+  const bool bt709 = true;
+  const bool fullRange = format == EffectPixelFormat::YUV420 && isFullRangeNv12(surface);
+  return submitSurface(surface, width, height, format, timestamp, std::move(lifetime), bt709,
+                       fullRange);
 }
 
 EffectResult AppleIOSurfaceInputNode::submit(const PixelBufferView& view) {
@@ -608,8 +633,8 @@ EffectResult AppleIOSurfaceInputNode::submit(const PixelBufferView& view) {
   if (view.waitToken != nullptr && !view.waitToken->wait(2000000000ull)) {
     return EffectResult::Busy;
   }
-  return submit(static_cast<IOSurfaceRef>(view.nativeHandle), view.width, view.height, view.format,
-    view.timestamp, view.lifetime);
+  return submitSurface(static_cast<IOSurfaceRef>(view.nativeHandle), view.width, view.height,
+    view.format, view.timestamp, view.lifetime, view.bt709, view.fullRange);
 }
 
 void AppleIOSurfaceInputNode::setTimestamp(const RenderTime timestamp) {
