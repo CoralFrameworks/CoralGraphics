@@ -2665,7 +2665,7 @@ void GpuRenderer::probeFieldReuse(const DrawList& list) {
     lattices.push_back(lattice);
 
     if (!comparable) continue;
-    const const FieldLattice& before = mFieldReuse.lattices[index];
+    const FieldLattice& before = mFieldReuse.lattices[index];
     if (lattice.hasCoverage) continue; // its bytes are not derivable, so its slot has to be refilled whatever it fits
     if (lattice.contentKey != before.contentKey) ++mFieldReuse.contentChanged;
     const bool latticeSame = lattice.originX == before.originX && lattice.originY == before.originY &&
