@@ -360,7 +360,11 @@ void Canvas::saveLayer(const Rect& bounds, const Paint& paint) {
   // ordering used to be the other way round, and then any draw after a layer was clipped to the layer's own
   // bounds - invisible as long as the layer covered the whole target, which is why most of the corpus never
   // noticed it.
-  const bool opened = mImpl->backend->beginLayer(bounds, paint);
+  // `beginLayer` takes device-space bounds. Passing `bounds` here worked only while the transform was
+  // the identity; at a fractional UI scale the backend allocated the unscaled rectangle, so the layer
+  // clipped its own scaled contents at the right and bottom edges.
+  const Rect deviceBounds = Rect::MakeLTRB(left, top, right, bottom);
+  const bool opened = mImpl->backend->beginLayer(deviceBounds, paint);
   mImpl->backend->setDeviceClip(next.deviceClip);
 
   // The backend decides whether it can open a layer at all. A recording backend opens one by recording an

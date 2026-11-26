@@ -7838,3 +7838,76 @@ TEST(GpuSurface, AppendedRecordingRespectsTheDestinationClip) {
   EXPECT_EQ(pixelAt(pixels, kSize * 3 / 4, kSize / 2), 0u)
     << "an appended recording must not paint outside the destination clip";
 }
+
+TEST(GpuSurface, AFractionalScaleKeepsATranslucentLayer) {
+  constexpr int kWidth = 240;
+  constexpr int kHeight = 180;
+  auto surface = graphics::gpu::Surface::make(kWidth, kHeight);
+  if (surface == nullptr) GTEST_SKIP() << "no GPU device could be brought up in this environment";
+  graphics::Canvas* canvas = surface->beginFrame();
+  ASSERT_NE(canvas, nullptr);
+  canvas->clear(graphics::Color::MakeRGBA8(0, 0, 0, 0));
+  canvas->scale(1.5f, 1.5f);
+
+  graphics::Paint blue;
+  blue.color = graphics::Color::MakeRGBA8(0, 0, 255, 255);
+  const graphics::Rect layerBounds = graphics::Rect::MakeLTRB(10.25f, 20.5f, 82.25f, 64.5f);
+  canvas->saveLayerAlpha(layerBounds, 191);
+  canvas->drawRect(layerBounds, blue);
+  canvas->restore();
+
+  ASSERT_TRUE(surface->submit()) << surface->diagnostics();
+  const graphics::Bitmap pixels = surface->snapshot();
+  ASSERT_FALSE(pixels.isEmpty());
+  const int x = static_cast<int>((25.0f) * 1.5f);
+  const int y = static_cast<int>((40.0f) * 1.5f);
+  const uint32_t pixel = pixelAt(pixels, x, y);
+  EXPECT_EQ((pixel >> 24) & 0xFFu, 191u) << "a translucent layer at fractional scale still composites";
+  EXPECT_EQ(pixel & 0x00FFFFFFu, 0x000000FFu) << "and keeps its colour";
+  const uint32_t edge = pixelAt(pixels, 118, 60);
+  EXPECT_EQ((edge >> 24) & 0xFFu, 191u) << "the layer target spans its transformed bounds, not the unscaled ones";
+}
+
+TEST(GpuSurface, AFractionalScaleKeepsATranslucentLayerThroughAnAppend) {
+  constexpr int kWidth = 240;
+  constexpr int kHeight = 180;
+  auto list = std::make_shared<DrawList>();
+  auto recording = makeRecordingCanvas(kWidth, kHeight, list);
+  ASSERT_NE(recording, nullptr);
+  recording->scale(1.5f, 1.5f);
+  graphics::Paint blue;
+  blue.color = graphics::Color::MakeRGBA8(0, 0, 255, 255);
+  const graphics::Rect layerBounds = graphics::Rect::MakeLTRB(10.25f, 20.5f, 82.25f, 64.5f);
+  recording->saveLayerAlpha(layerBounds, 191);
+  recording->drawRect(layerBounds, blue);
+  recording->restore();
+
+  auto surface = graphics::gpu::Surface::make(kWidth, kHeight);
+  if (surface == nullptr) GTEST_SKIP() << "no GPU device could be brought up in this environment";
+  graphics::Canvas* canvas = surface->beginFrame();
+  ASSERT_NE(canvas, nullptr);
+  canvas->clear(graphics::Color::MakeRGBA8(0, 0, 0, 0));
+  ASSERT_TRUE(canvas->appendRecording(*list, graphics::Point{ 0.0f, 0.0f }));
+  ASSERT_TRUE(surface->submit()) << surface->diagnostics();
+  const graphics::Bitmap pixels = surface->snapshot();
+  ASSERT_FALSE(pixels.isEmpty());
+  const uint32_t pixel = pixelAt(pixels, 37, 60);
+  EXPECT_EQ((pixel >> 24) & 0xFFu, 191u) << "an appended translucent layer keeps its alpha";
+  EXPECT_EQ(pixel & 0x00FFFFFFu, 0x000000FFu) << "and its colour";
+}
+
+TEST(GpuRecording, SaveLayerBoundsAreInDeviceSpace) {
+  auto list = std::make_shared<DrawList>();
+  auto canvas = makeRecordingCanvas(240, 180, list);
+  ASSERT_NE(canvas, nullptr);
+  canvas->scale(1.5f, 1.5f);
+  canvas->saveLayerAlpha(graphics::Rect::MakeLTRB(10.0f, 20.0f, 82.0f, 64.0f), 191);
+  canvas->restore();
+
+  ASSERT_GE(list->layers.size(), 2u);
+  const graphics::Rect& bounds = list->layers[1].bounds;
+  EXPECT_NEAR(bounds.getLeft(), 15.0f, 0.01f) << "the layer is recorded in device space";
+  EXPECT_NEAR(bounds.getTop(), 30.0f, 0.01f);
+  EXPECT_NEAR(bounds.getWidth(), 108.0f, 0.01f) << "the layer target covers the scaled bounds";
+  EXPECT_NEAR(bounds.getHeight(), 66.0f, 0.01f);
+}
