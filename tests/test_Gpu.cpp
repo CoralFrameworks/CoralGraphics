@@ -7808,3 +7808,33 @@ TEST(GpuSurface, ATranslatedListUnderAFractionalClipMatchesTheCanvasPath) {
   }
   EXPECT_EQ(mismatches, 0) << mismatches << " pixels differ between a translated list and the canvas path";
 }
+
+TEST(GpuSurface, AppendedRecordingRespectsTheDestinationClip) {
+  constexpr int kSize = 32;
+  auto surface = graphics::gpu::Surface::make(kSize, kSize);
+  ASSERT_NE(surface, nullptr);
+
+  graphics::gpu::Recorder sourceRecorder(kSize, kSize, nullptr, "source");
+  graphics::Paint red;
+  red.color = graphics::Color::MakeRGBA8(255, 0, 0, 255);
+  sourceRecorder.canvas().drawRect(
+    graphics::Rect::MakeLTRB(0.0f, 0.0f, static_cast<graphics::Scalar>(kSize),
+      static_cast<graphics::Scalar>(kSize)), red);
+  graphics::gpu::DrawList source = sourceRecorder.finish();
+
+  graphics::Canvas* canvas = surface->beginFrame();
+  ASSERT_NE(canvas, nullptr);
+  canvas->save();
+  canvas->clipRect(graphics::Rect::MakeLTRB(0.0f, 0.0f, kSize / 2.0f,
+    static_cast<graphics::Scalar>(kSize)));
+  ASSERT_TRUE(canvas->appendRecording(source, graphics::Point{ 0.0f, 0.0f }));
+  canvas->restore();
+  ASSERT_TRUE(surface->submit()) << surface->diagnostics();
+
+  const graphics::Bitmap pixels = surface->snapshot();
+  ASSERT_FALSE(pixels.isEmpty());
+  EXPECT_EQ(pixelAt(pixels, kSize / 4, kSize / 2), 0xFFFF0000u)
+    << "the clipped half of the appended list must draw";
+  EXPECT_EQ(pixelAt(pixels, kSize * 3 / 4, kSize / 2), 0u)
+    << "an appended recording must not paint outside the destination clip";
+}

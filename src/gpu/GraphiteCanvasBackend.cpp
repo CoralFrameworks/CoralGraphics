@@ -764,6 +764,23 @@ public:
       command.layer = layerMap[command.layer];
       for (Rect& geometry: command.geometry) geometry = moved(geometry);
       command.clipRect = moved(command.clipRect);
+      // ## A cached list must not escape the clip it is appended under
+      //
+      // A repaint boundary records its own list without its ancestors' clip and hands that list back here.
+      // Appending it unchanged let a nested scroll viewport draw below its parent viewport -- visible as
+      // page content bleeding through a footer. Fold the canvas's current device clip into every command,
+      // exactly as `bakeListState` does for the lent-list path; layer open/close stay paired even when the
+      // clip rejects their pixels.
+      if (!mDeviceClip.isEmpty()) {
+        const Rect visible = intersect(command.clipRect, mDeviceClip);
+        const bool empty = visible.getRight() <= visible.getLeft() ||
+          visible.getBottom() <= visible.getTop();
+        if (empty && command.kind != gpu::DrawList::Kind::OpenLayer &&
+            command.kind != gpu::DrawList::Kind::CloseLayer) {
+          continue;
+        }
+        command.clipRect = visible;
+      }
       destination.commands.push_back(std::move(command));
     }
 
