@@ -714,6 +714,7 @@ public:
     const auto fieldBase = static_cast<uint32_t>(destination.coverageFields.size());
 
     std::vector<uint32_t> layerMap(source.layers.size(), rootLayer);
+    const size_t appendedLayerBase = destination.layers.size();
     for (size_t index = 1; index < source.layers.size(); ++index) {
       layerMap[index] = static_cast<uint32_t>(destination.layers.size());
       gpu::Layer layer = source.layers[index];
@@ -739,6 +740,15 @@ public:
         mImageIndices.emplace(key, placed);
         imageMap[index] = placed;
       }
+    }
+
+    // A layer's mask is an image index exactly like a command's `state.image`, and the append already
+    // renumbers the image table (it may even deduplicate). An unchanged `maskImage` would sample
+    // whatever bitmap occupies that slot in the destination -- a glyph atlas, for a rounded clip.
+    for (size_t layerIndex = appendedLayerBase; layerIndex < destination.layers.size(); ++layerIndex) {
+      uint32_t& maskImage = destination.layers[layerIndex].maskImage;
+      if (maskImage == gpu::Layer::kNoMaskImage) continue;
+      maskImage = maskImage < imageMap.size() ? imageMap[maskImage] : gpu::Layer::kNoMaskImage;
     }
 
     for (gpu::DrawList::Command command: source.commands) {

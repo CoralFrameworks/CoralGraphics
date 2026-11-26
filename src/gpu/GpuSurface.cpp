@@ -133,7 +133,13 @@ void mergeInto(DrawList& destination, DrawList&& source) {
   const size_t sourcedLayers = source.layers.size();
 
   for (size_t index = 1; index < sourcedLayers; ++index) {
-    destination.layers.push_back(std::move(source.layers[index]));
+    gpu::Layer layer = std::move(source.layers[index]);
+    // A layer's mask is an image index too, and it has to move with the same base as a command's
+    // `state.image`. Without this the layer kept pointing at the source list's image table, so the
+    // mask sampled whatever bitmap happened to occupy that slot in the destination -- glyph atlases,
+    // most visibly, which is what a rounded clip's mask looked like when it was merged.
+    if (layer.maskImage != gpu::Layer::kNoMaskImage) layer.maskImage += imageBase;
+    destination.layers.push_back(std::move(layer));
   }
 
   const auto remapLayer = [layerBase](const uint32_t layer) noexcept -> uint32_t {

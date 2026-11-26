@@ -4862,7 +4862,140 @@ TEST(GpuSurface, TwoRecordingsImagesDoNotCrossOverWhenTheyAreMerged) {
 }
 
 /**
- * The retained path: the **same** recording is submitted twice, and the caller keeps it.
+ * A merged recording's mask must name its own image, not whatever occupies that index in the destination.
+ *
+ * `Layer::maskImage` is an index into `DrawList::images`, exactly like `CommandState::image`. It was left
+ * alone when recordings were merged while command images were re-based, so the second recording's mask
+ * sampled the first recording's bitmap. In the UI that is a rounded card whose mask is a glyph atlas:
+ * the card is composited through glyph shapes, stretched over the card. This test puts an opaque red
+ * bitmap in the first recording and a half-opaque mask in the second: an unre-based mask makes the
+ * bottom-right green as well.
+ */
+TEST(GpuSurface, MergedRecordingsRebaseALayersMaskImage) {
+  constexpr int kSize = 64;
+  constexpr int kBitmap = 16;
+
+  auto surface = graphics::gpu::Surface::make(kSize, kSize);
+  if (surface == nullptr) GTEST_SKIP() << "no GPU device could be brought up in this environment";
+
+  graphics::Bitmap red = graphics::Bitmap::allocate(kBitmap, kBitmap);
+  graphics::Pixmap redPixels = red.lockPixels();
+  for (int y = 0; y < kBitmap; ++y) {
+    for (int x = 0; x < kBitmap; ++x) redPixels.setPixelARGB32(x, y, 0xFFFF0000u);
+  }
+
+  // The second recording's mask: opaque on the top half of the layer only.
+  graphics::Bitmap mask = graphics::Bitmap::allocate(kSize / 2, kSize);
+  graphics::Pixmap maskPixels = mask.lockPixels();
+  for (int y = 0; y < kSize; ++y) {
+    for (int x = 0; x < kSize / 2; ++x) {
+      maskPixels.setPixelARGB32(x, y, y < kSize / 2 ? 0xFFFFFFFFu : 0x00000000u);
+    }
+  }
+
+  graphics::Paint white;
+  white.color = graphics::Color::MakeRGBA8(255, 255, 255, 255);
+  graphics::gpu::Recorder firstRecorder(kSize, kSize, nullptr, "first");
+  firstRecorder.canvas().drawBitmap(red, 0.0f, 0.0f, white);
+
+  graphics::gpu::Recorder secondRecorder(kSize, kSize, nullptr, "second");
+  graphics::Canvas& second = secondRecorder.canvas();
+  graphics::Paint green;
+  green.color = graphics::Color::MakeRGBA8(0, 255, 0, 255);
+  const graphics::Rect layerBounds =
+    graphics::Rect::MakeLTRB(kSize / 2.0f, 0.0f, static_cast<graphics::Scalar>(kSize),
+      static_cast<graphics::Scalar>(kSize));
+  second.saveLayerAlpha(layerBounds, 255);
+  second.drawRect(layerBounds, green);
+  second.maskLayer(mask, graphics::MaskMode::kAlpha, true);
+  second.restore();
+
+  graphics::gpu::DrawList firstList = firstRecorder.finish();
+  graphics::gpu::DrawList secondList = secondRecorder.finish();
+  ASSERT_EQ(firstList.images.size(), 1u) << "the first recording registered no bitmap";
+  ASSERT_EQ(secondList.images.size(), 1u) << "the mask should be the second recording's only image";
+  ASSERT_EQ(secondList.layers.size(), 2u);
+  ASSERT_EQ(secondList.layers[1].maskImage, 0u) << "the source mask names its own list's image 0";
+
+  ASSERT_NE(surface->beginFrame(), nullptr);
+  ASSERT_TRUE(surface->addDrawList(std::move(firstList)));
+  ASSERT_TRUE(surface->addDrawList(std::move(secondList)));
+  ASSERT_TRUE(surface->submit()) << surface->diagnostics();
+  const graphics::Bitmap pixels = surface->snapshot();
+  ASSERT_FALSE(pixels.isEmpty());
+
+  const auto alphaAt = [&pixels](const int x, const int y) {
+    return static_cast<int>((pixelAt(pixels, x, y) >> 24) & 0xFFu);
+  };
+  EXPECT_EQ(pixelAt(pixels, kBitmap / 2, kBitmap / 2), 0xFFFF0000u)
+    << "the first recording's bitmap still draws itself";
+  EXPECT_EQ(pixelAt(pixels, kSize * 3 / 4, kSize / 4), 0xFF00FF00u)
+    << "the masked half survives";
+  EXPECT_EQ(alphaAt(kSize * 3 / 4, kSize * 3 / 4), 0)
+    << "the transparent half of the mask must not be replaced by the previous recording's bitmap";
+}
+
+TEST(GpuSurface, AppendingARecordingRebasesALayersMaskImage) {
+  constexpr int kSize = 64;
+  constexpr int kBitmap = 16;
+
+  auto surface = graphics::gpu::Surface::make(kSize, kSize);
+  if (surface == nullptr) GTEST_SKIP() << "no GPU device could be brought up in this environment";
+
+  // The appended recording's mask, opaque on the top half of its layer only.
+  graphics::Bitmap mask = graphics::Bitmap::allocate(kSize / 2, kSize);
+  graphics::Pixmap maskPixels = mask.lockPixels();
+  for (int y = 0; y < kSize; ++y) {
+    for (int x = 0; x < kSize / 2; ++x) {
+      maskPixels.setPixelARGB32(x, y, y < kSize / 2 ? 0xFFFFFFFFu : 0x00000000u);
+    }
+  }
+
+  auto shape = std::make_shared<DrawList>();
+  {
+    std::unique_ptr<graphics::Canvas> canvas = makeRecordingCanvas(kSize, kSize, shape);
+    ASSERT_NE(canvas, nullptr);
+    graphics::Paint green;
+    green.color = graphics::Color::MakeRGBA8(0, 255, 0, 255);
+    const graphics::Rect layerBounds =
+      graphics::Rect::MakeLTRB(kSize / 2.0f, 0.0f, static_cast<graphics::Scalar>(kSize),
+        static_cast<graphics::Scalar>(kSize));
+    canvas->saveLayerAlpha(layerBounds, 255);
+    canvas->drawRect(layerBounds, green);
+    canvas->maskLayer(mask, graphics::MaskMode::kAlpha, true);
+    canvas->restore();
+  }
+  ASSERT_EQ(shape->layers.size(), 2u);
+  ASSERT_EQ(shape->layers[1].maskImage, 0u) << "the source mask names its own list's image 0";
+
+  // The destination already has an image before the append, so the mask's index has to move by one.
+  graphics::Bitmap red = graphics::Bitmap::allocate(kBitmap, kBitmap);
+  graphics::Pixmap redPixels = red.lockPixels();
+  for (int y = 0; y < kBitmap; ++y) {
+    for (int x = 0; x < kBitmap; ++x) redPixels.setPixelARGB32(x, y, 0xFFFF0000u);
+  }
+  graphics::Canvas* canvas = surface->beginFrame();
+  ASSERT_NE(canvas, nullptr);
+  graphics::Paint white;
+  white.color = graphics::Color::MakeRGBA8(255, 255, 255, 255);
+  canvas->drawBitmap(red, 0.0f, 0.0f, white);
+  ASSERT_TRUE(canvas->appendRecording(*shape, graphics::Point{ 0.0f, 0.0f }))
+    << "an untranslated append must be expressible";
+  ASSERT_TRUE(surface->submit()) << surface->diagnostics();
+  const graphics::Bitmap pixels = surface->snapshot();
+  ASSERT_FALSE(pixels.isEmpty());
+
+  const auto alphaAt = [&pixels](const int x, const int y) {
+    return static_cast<int>((pixelAt(pixels, x, y) >> 24) & 0xFFu);
+  };
+  EXPECT_EQ(pixelAt(pixels, kBitmap / 2, kBitmap / 2), 0xFFFF0000u)
+    << "the destination bitmap still draws itself";
+  EXPECT_EQ(pixelAt(pixels, kSize * 3 / 4, kSize / 4), 0xFF00FF00u) << "the masked half survives";
+  EXPECT_EQ(alphaAt(kSize * 3 / 4, kSize * 3 / 4), 0)
+    << "the mask must not resolve to the destination's first bitmap after the append";
+}
+
+/**
  *
  * `DrawList`'s copy constructor is deleted and `addDrawList` consumes the list, so before `Surface::submitRecording`
  * there was no way to submit one recording twice at all -- a caller had to clone it (3.6-4.3 ms on the demo scene, 4.1.40)
