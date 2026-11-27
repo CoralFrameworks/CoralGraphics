@@ -58,8 +58,23 @@ if (-not (Test-Path $SourceDir)) {
   throw "embed_shaders: SourceDir '$SourceDir' does not exist. Nothing was compiled, so nothing can be embedded."
 }
 
+# PowerShell 5.1's [Array]::Sort overload for a System.Comparison does not reliably invoke the script block;
+# a build could then compare the committed manifest against directory enumeration order. Use an explicit
+# ordinal insertion sort so the generated header and the C++ guard always agree on name order.
+function Sort-FilesByName([System.IO.FileInfo[]]$files) {
+  $sorted = New-Object 'System.Collections.Generic.List[System.IO.FileInfo]'
+  foreach ($file in $files) {
+    $index = 0
+    while ($index -lt $sorted.Count -and
+           [string]::CompareOrdinal($sorted[$index].Name, $file.Name) -le 0) {
+      ++$index
+    }
+    $sorted.Insert($index, $file)
+  }
+  return $sorted
+}
 $inputFiles = @(Get-ChildItem -Path $SourceDir -Filter '*.spv' -File)
-[Array]::Sort($inputFiles, [System.Comparison[System.IO.FileInfo]] { param($left, $right) [string]::CompareOrdinal($left.Name, $right.Name) })
+$inputFiles = Sort-FilesByName $inputFiles
 $inputPaths = @($inputFiles | Select-Object -ExpandProperty FullName)
 if ($inputPaths.Count -eq 0) {
   throw "embed_shaders: no .spv under '$SourceDir'. An empty shader set would build a renderer that reports every lookup as missing, so this is an error rather than a warning."
@@ -87,7 +102,7 @@ function Get-ShaderSourceManifest([string]$directory) {
       Where-Object { $_.Extension -in '.vert', '.frag', '.comp' })
   # Ordinal, not `Sort-Object Name`: cultural collation ranks `.` against `_` differently from the byte comparison the C++
   # guard does, so the two manifests would differ in order and the strings would not be equal.
-  [Array]::Sort($files, [System.Comparison[System.IO.FileInfo]] { param($left, $right) [string]::CompareOrdinal($left.Name, $right.Name) })
+  $files = Sort-FilesByName $files
   foreach ($file in $files) {
     $bytes = [System.IO.File]::ReadAllBytes($file.FullName)
     [uint64]$sum = 0
@@ -180,7 +195,7 @@ if ($VulkanSourceDir -ne "") {
     throw "embed_shaders: VulkanSourceDir '$VulkanSourceDir' does not exist."
   }
   $vulkanFiles = @(Get-ChildItem -Path $VulkanSourceDir -Filter '*.spv' -File)
-  [Array]::Sort($vulkanFiles, [System.Comparison[System.IO.FileInfo]] { param($left, $right) [string]::CompareOrdinal($left.Name, $right.Name) })
+  $vulkanFiles = Sort-FilesByName $vulkanFiles
   if ($vulkanFiles.Count -eq 0) {
     throw "embed_shaders: no .spv under '$VulkanSourceDir', but a Vulkan shader set was requested. A build that embeds nothing would draw nothing."
   }
